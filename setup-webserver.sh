@@ -15,6 +15,12 @@ if [[ $EUID -ne 0 ]]; then
    exit 1
 fi
 
+# --- Ensure OpenSSH Server is installed ---
+apt install -y openssh-server
+systemctl enable ssh
+systemctl start ssh
+echo "✅ OpenSSH Server installed and running"
+
 # --- System update ---
 apt update && apt -y upgrade
 
@@ -47,13 +53,7 @@ sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config
 sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
 
 # Restart SSH safely
-if systemctl list-unit-files | grep -q '^ssh\.service'; then
-    systemctl restart ssh
-elif systemctl list-unit-files | grep -q '^sshd\.service'; then
-    systemctl restart sshd
-else
-    echo "⚠️ Warning: Could not detect SSH service name."
-fi
+systemctl restart ssh || systemctl restart sshd || echo "⚠️ SSH service not detected, skipping restart"
 
 # --- Install essentials ---
 apt install -y curl wget git ufw fail2ban software-properties-common
