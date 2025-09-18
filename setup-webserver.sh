@@ -17,7 +17,7 @@ fi
 # --- Update system ---
 apt update && apt -y upgrade
 
-# --- Install OpenSSH Server (non-interactive) ---
+# --- Install OpenSSH Server ---
 export DEBIAN_FRONTEND=noninteractive
 apt install -y openssh-server
 systemctl enable ssh
@@ -52,7 +52,7 @@ sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config
 sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
 systemctl restart ssh || systemctl restart sshd || echo "⚠️ SSH restart skipped"
 
-# --- Install essentials (non-interactive) ---
+# --- Install essentials ---
 export DEBIAN_FRONTEND=noninteractive
 apt install -y curl wget git ufw fail2ban software-properties-common unattended-upgrades apt-listchanges rkhunter
 unset DEBIAN_FRONTEND
@@ -68,7 +68,7 @@ apt install -y nginx php-fpm php-mysql mariadb-server
 # --- Enable HTTP/2 in Nginx ---
 sed -i 's/listen 443 ssl;/listen 443 ssl http2;/' /etc/nginx/sites-available/default
 
-# --- Certbot (interactive) ---
+# --- Certbot ---
 apt install -y certbot python3-certbot-nginx
 read -p "Enter your domain (example.com): " DOMAIN
 read -p "Enter your email for SSL: " EMAIL
@@ -77,7 +77,7 @@ if [ -n "$DOMAIN" ] && [ -n "$EMAIL" ]; then
     systemctl enable certbot.timer
 fi
 
-# --- Add Nginx security headers ---
+# --- Nginx security headers ---
 NGINX_DEFAULT="/etc/nginx/sites-available/default"
 if [ -f "$NGINX_DEFAULT" ]; then
     echo "🔒 Adding security headers..."
@@ -112,27 +112,30 @@ add-apt-repository "deb http://download.webmin.com/download/repository sarge con
 apt update
 apt install -y webmin
 
-# --- Git auto-deploy setup ---
+# --- Git auto-deploy setup (fixed with tee) ---
 DEPLOY_DIR="/var/www/$DOMAIN"
-mkdir -p $DEPLOY_DIR
-chown -R $DEPLOY_USER:$DEPLOY_USER $DEPLOY_DIR
+mkdir -p "$DEPLOY_DIR"
+chown -R $DEPLOY_USER:$DEPLOY_USER "$DEPLOY_DIR"
 
-su - $DEPLOY_USER -c 'mkdir -p ~/repos && cd ~/repos
-git init --bare '"$DOMAIN"'.git
-cd '"$DOMAIN"'.git/hooks
-cat > post-receive <<EOF
+REPO_DIR="/home/$DEPLOY_USER/repos/$DOMAIN.git"
+mkdir -p "$REPO_DIR/hooks"
+chown -R $DEPLOY_USER:$DEPLOY_USER "/home/$DEPLOY_USER/repos"
+
+tee "$REPO_DIR/hooks/post-receive" > /dev/null <<EOF
 #!/bin/bash
-GIT_WORK_TREE='"$DEPLOY_DIR"' git checkout -f
+GIT_WORK_TREE=$DEPLOY_DIR git checkout -f
 systemctl restart nginx
 EOF
-chmod +x post-receive'
+
+chmod +x "$REPO_DIR/hooks/post-receive"
+chown $DEPLOY_USER:$DEPLOY_USER "$REPO_DIR/hooks/post-receive"
 
 # --- Post-install summary ---
 echo ""
 echo "🎉 Setup Complete!"
 echo "🌐 Website: https://$DOMAIN"
 echo "🖥 Webmin: https://$DOMAIN:10000/"
-echo "📦 Git auto-deploy: /home/$DEPLOY_USER/repos/$DOMAIN.git"
+echo "📦 Git auto-deploy repo: /home/$DEPLOY_USER/repos/$DOMAIN.git"
 echo "🔑 Deploy SSH key:"
 cat /home/$DEPLOY_USER/.ssh/id_ed25519.pub
 echo ""
