@@ -15,16 +15,18 @@ if [[ $EUID -ne 0 ]]; then
    exit 1
 fi
 
-# --- Ensure OpenSSH Server is installed ---
+# --- Update system ---
+apt update && apt -y upgrade
+
+# --- Ensure OpenSSH Server is installed (non-interactive) ---
+export DEBIAN_FRONTEND=noninteractive
 apt install -y openssh-server
 systemctl enable ssh
 systemctl start ssh
 echo "✅ OpenSSH Server installed and running"
+unset DEBIAN_FRONTEND
 
-# --- System update ---
-apt update && apt -y upgrade
-
-# --- Create non-root deploy user ---
+# --- Create non-root deploy user (interactive) ---
 read -p "Enter username for deploy user [deploy]: " DEPLOY_USER
 DEPLOY_USER=${DEPLOY_USER:-deploy}
 
@@ -37,13 +39,11 @@ fi
 mkdir -p /home/$DEPLOY_USER/.ssh
 chmod 700 /home/$DEPLOY_USER/.ssh
 
-# Generate SSH key if none exists
 if [ ! -f /home/$DEPLOY_USER/.ssh/id_ed25519 ]; then
     echo "🔑 Generating SSH key for $DEPLOY_USER..."
     su - $DEPLOY_USER -c "ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519 -N ''"
 fi
 
-# Add public key to authorized_keys
 cat /home/$DEPLOY_USER/.ssh/id_ed25519.pub >> /home/$DEPLOY_USER/.ssh/authorized_keys
 chmod 600 /home/$DEPLOY_USER/.ssh/authorized_keys
 chown -R $DEPLOY_USER:$DEPLOY_USER /home/$DEPLOY_USER/.ssh
@@ -51,12 +51,12 @@ chown -R $DEPLOY_USER:$DEPLOY_USER /home/$DEPLOY_USER/.ssh
 # --- Harden SSH ---
 sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config
 sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
-
-# Restart SSH safely
 systemctl restart ssh || systemctl restart sshd || echo "⚠️ SSH service not detected, skipping restart"
 
-# --- Install essentials ---
-apt install -y curl wget git ufw fail2ban software-properties-common
+# --- Install non-interactive essentials ---
+export DEBIAN_FRONTEND=noninteractive
+apt install -y curl wget git ufw fail2ban software-properties-common unattended-upgrades apt-listchanges rkhunter
+unset DEBIAN_FRONTEND
 
 # --- Configure firewall ---
 ufw allow OpenSSH
@@ -69,7 +69,7 @@ apt install -y nginx php-fpm php-mysql mariadb-server
 # --- Enable HTTP/2 in Nginx ---
 sed -i 's/listen 443 ssl;/listen 443 ssl http2;/' /etc/nginx/sites-available/default
 
-# --- Install Certbot ---
+# --- Certbot (interactive for domain/email) ---
 apt install -y certbot python3-certbot-nginx
 read -p "Enter your domain (example.com): " DOMAIN
 read -p "Enter your email for SSL renewal notices: " EMAIL
@@ -78,9 +78,8 @@ if [ -n "$DOMAIN" ] && [ -n "$EMAIL" ]; then
     systemctl enable certbot.timer
 fi
 
-# --- Add Nginx security headers ---
+# --- Nginx security headers ---
 NGINX_DEFAULT="/etc/nginx/sites-available/default"
-
 if [ -f "$NGINX_DEFAULT" ]; then
     echo "🔒 Adding security headers to Nginx..."
     sed -i '/server_name _;/a \
@@ -91,33 +90,30 @@ if [ -f "$NGINX_DEFAULT" ]; then
         add_header Referrer-Policy "no-referrer-when-downgrade" always;\
         add_header Content-Security-Policy "default-src '\''self'\''; script-src '\''self'\''; object-src '\''none'\''; style-src '\''self'\'' '\''unsafe-inline'\'';" always;\
     ' "$NGINX_DEFAULT"
-
     nginx -t && systemctl reload nginx
-else
-    echo "⚠️ Warning: Nginx default site config not found."
 fi
 
-# --- Install ModSecurity ---
+# --- ModSecurity ---
 apt install -y libnginx-mod-security
 sed -i 's/#Include modsecurity.conf/Include modsecurity.conf/' /etc/nginx/nginx.conf
 systemctl restart nginx
 
-# --- Install rkhunter ---
-apt install -y rkhunter
-rkhunter --update
-rkhunter --propupd
+# --- Postfix (interactive) ---
+read -p "Do you want to install Postfix for local mail? [y/N]: " INSTALL_POSTFIX
+if [[ "$INSTALL_POSTFIX" =~ ^[Yy]$ ]]; then
+    read -p "Enter your mail domain (example.com): " MAIL_DOMAIN
+    echo "postfix postfix/mailname string $MAIL_DOMAIN" | debconf-set-selections
+    echo "postfix postfix/main_mailer_type string 'Internet Site'" | debconf-set-selections
+    apt install -y postfix
+fi
 
-# --- Install unattended-upgrades ---
-apt install -y unattended-upgrades apt-listchanges
-dpkg-reconfigure -plow unattended-upgrades
-
-# --- Install Webmin ---
+# --- Webmin ---
 wget -q http://www.webmin.com/jcameron-key.asc -O- | apt-key add -
 add-apt-repository "deb http://download.webmin.com/download/repository sarge contrib"
 apt update
 apt install -y webmin
 
-# --- Git Auto-deploy setup ---
+# --- Git auto-deploy setup ---
 DEPLOY_DIR="/var/www/$DOMAIN"
 mkdir -p $DEPLOY_DIR
 chown -R $DEPLOY_USER:$DEPLOY_USER $DEPLOY_DIR
@@ -135,37 +131,23 @@ EOF
 chmod +x post-receive
 "
 
-# --- Post-install summary / web UI cheat sheet ---
+# --- Post-install cheat sheet ---
 echo ""
-echo "🎉 Web Server Setup Complete! Here's how to access everything:"
-echo ""
-echo "🌐 Your website root:"
-echo "  https://$DOMAIN"
-echo ""
-echo "🖥 Webmin (server management UI):"
-echo "  https://$DOMAIN:10000/"
-echo "  Login with: username='root' (or your sudo deploy user), password=your root password"
-echo ""
-echo "📦 Git auto-deploy repository:"
-echo "  /home/$DEPLOY_USER/repos/$DOMAIN.git"
-echo "  Push code using:"
-echo "    git remote add production ssh://$DEPLOY_USER@YOUR_SERVER_IP/home/$DEPLOY_USER/repos/$DOMAIN.git"
-echo "    git push production main"
-echo ""
-echo "🔑 SSH Key for deploy user ($DEPLOY_USER):"
-echo "Copy this public key to GitHub or other services:"
+echo "🎉 Web Server Setup Complete!"
+echo "🌐 Website root: https://$DOMAIN"
+echo "🖥 Webmin: https://$DOMAIN:10000/ (login with root or deploy user)"
+echo "📦 Git auto-deploy: /home/$DEPLOY_USER/repos/$DOMAIN.git"
+echo "🔑 Deploy user SSH key:"
 cat /home/$DEPLOY_USER/.ssh/id_ed25519.pub
 echo ""
 echo "🔒 Security:"
-echo "  - SSH: key-based login only for user '$DEPLOY_USER'"
-echo "  - Firewall: UFW enabled, OpenSSH + Nginx Full allowed"
+echo "  - SSH key-only for $DEPLOY_USER"
+echo "  - Firewall: UFW enabled"
 echo "  - Fail2Ban active"
-echo "  - ModSecurity WAF active"
+echo "  - ModSecurity active"
 echo "  - Nginx security headers & strict CSP applied"
 echo ""
-echo "📜 Monitoring / logs:"
-echo "  - Logwatch (daily email summary)"
-echo "  - rkhunter for rootkit scanning"
-echo "  - Glances (interactive system dashboard): run 'glances' after login"
-echo ""
-echo "✅ Done! All critical services are running and secure."
+echo "📜 Monitoring:"
+echo "  - rkhunter rootkit scans"
+echo "  - Glances: run 'glances' for interactive dashboard"
+echo "✅ Done!"
