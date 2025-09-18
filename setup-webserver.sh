@@ -2,31 +2,30 @@
 
 ### Ubuntu Web Server Setup Script ###
 # Hardened, secure, production-ready
-# Source: killerhash-stack/ubuntu-webserver-setup
+# GitHub: killerhash-stack/ubuntu-webserver-setup
 
 echo "🚀 Starting Web Server Setup Script"
-echo "📦 GitHub: https://github.com/killerhash-stack/ubuntu-webserver-setup"
 echo "🕒 Timestamp: $(date)"
 echo ""
 
 # --- Root check ---
 if [[ $EUID -ne 0 ]]; then
-   echo "❌ This script must be run as root. Use: sudo bash $0"
+   echo "❌ Must run as root: sudo bash $0"
    exit 1
 fi
 
 # --- Update system ---
 apt update && apt -y upgrade
 
-# --- Ensure OpenSSH Server is installed (non-interactive) ---
+# --- Install OpenSSH Server (non-interactive) ---
 export DEBIAN_FRONTEND=noninteractive
 apt install -y openssh-server
 systemctl enable ssh
 systemctl start ssh
-echo "✅ OpenSSH Server installed and running"
+echo "✅ OpenSSH installed and running"
 unset DEBIAN_FRONTEND
 
-# --- Create non-root deploy user (interactive) ---
+# --- Create non-root deploy user ---
 read -p "Enter username for deploy user [deploy]: " DEPLOY_USER
 DEPLOY_USER=${DEPLOY_USER:-deploy}
 
@@ -51,9 +50,9 @@ chown -R $DEPLOY_USER:$DEPLOY_USER /home/$DEPLOY_USER/.ssh
 # --- Harden SSH ---
 sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config
 sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
-systemctl restart ssh || systemctl restart sshd || echo "⚠️ SSH service not detected, skipping restart"
+systemctl restart ssh || systemctl restart sshd || echo "⚠️ SSH restart skipped"
 
-# --- Install non-interactive essentials ---
+# --- Install essentials (non-interactive) ---
 export DEBIAN_FRONTEND=noninteractive
 apt install -y curl wget git ufw fail2ban software-properties-common unattended-upgrades apt-listchanges rkhunter
 unset DEBIAN_FRONTEND
@@ -72,16 +71,16 @@ sed -i 's/listen 443 ssl;/listen 443 ssl http2;/' /etc/nginx/sites-available/def
 # --- Certbot (interactive) ---
 apt install -y certbot python3-certbot-nginx
 read -p "Enter your domain (example.com): " DOMAIN
-read -p "Enter your email for SSL renewal notices: " EMAIL
+read -p "Enter your email for SSL: " EMAIL
 if [ -n "$DOMAIN" ] && [ -n "$EMAIL" ]; then
     certbot --nginx -d $DOMAIN -d www.$DOMAIN --non-interactive --agree-tos -m $EMAIL
     systemctl enable certbot.timer
 fi
 
-# --- Nginx security headers ---
+# --- Add Nginx security headers ---
 NGINX_DEFAULT="/etc/nginx/sites-available/default"
 if [ -f "$NGINX_DEFAULT" ]; then
-    echo "🔒 Adding security headers to Nginx..."
+    echo "🔒 Adding security headers..."
     sed -i '/server_name _;/a \
         add_header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload" always;\
         add_header X-Frame-Options "SAMEORIGIN" always;\
@@ -98,10 +97,10 @@ apt install -y libnginx-mod-security
 sed -i 's/#Include modsecurity.conf/Include modsecurity.conf/' /etc/nginx/nginx.conf
 systemctl restart nginx
 
-# --- Optional Postfix (interactive) ---
-read -p "Do you want to install Postfix for local mail? [y/N]: " INSTALL_POSTFIX
+# --- Optional Postfix ---
+read -p "Install Postfix for local mail? [y/N]: " INSTALL_POSTFIX
 if [[ "$INSTALL_POSTFIX" =~ ^[Yy]$ ]]; then
-    read -p "Enter your mail domain (example.com): " MAIL_DOMAIN
+    read -p "Enter mail domain (example.com): " MAIL_DOMAIN
     echo "postfix postfix/mailname string $MAIL_DOMAIN" | debconf-set-selections
     echo "postfix postfix/main_mailer_type string 'Internet Site'" | debconf-set-selections
     apt install -y postfix
@@ -113,7 +112,7 @@ add-apt-repository "deb http://download.webmin.com/download/repository sarge con
 apt update
 apt install -y webmin
 
-# --- Git auto-deploy setup (fixed heredoc) ---
+# --- Git auto-deploy setup ---
 DEPLOY_DIR="/var/www/$DOMAIN"
 mkdir -p $DEPLOY_DIR
 chown -R $DEPLOY_USER:$DEPLOY_USER $DEPLOY_DIR
@@ -128,23 +127,15 @@ systemctl restart nginx
 EOF
 chmod +x post-receive'
 
-# --- Post-install cheat sheet ---
+# --- Post-install summary ---
 echo ""
-echo "🎉 Web Server Setup Complete!"
-echo "🌐 Website root: https://$DOMAIN"
-echo "🖥 Webmin: https://$DOMAIN:10000/ (login with root or deploy user)"
+echo "🎉 Setup Complete!"
+echo "🌐 Website: https://$DOMAIN"
+echo "🖥 Webmin: https://$DOMAIN:10000/"
 echo "📦 Git auto-deploy: /home/$DEPLOY_USER/repos/$DOMAIN.git"
-echo "🔑 Deploy user SSH key:"
+echo "🔑 Deploy SSH key:"
 cat /home/$DEPLOY_USER/.ssh/id_ed25519.pub
 echo ""
-echo "🔒 Security:"
-echo "  - SSH key-only for $DEPLOY_USER"
-echo "  - Firewall: UFW enabled"
-echo "  - Fail2Ban active"
-echo "  - ModSecurity active"
-echo "  - Nginx security headers & strict CSP applied"
-echo ""
-echo "📜 Monitoring:"
-echo "  - rkhunter rootkit scans"
-echo "  - Glances: run 'glances' for interactive dashboard"
+echo "🔒 Security: SSH key-only login, UFW, Fail2Ban, ModSecurity, Nginx headers"
+echo "📜 Monitoring: rkhunter, Glances"
 echo "✅ Done!"
