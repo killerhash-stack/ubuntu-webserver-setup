@@ -2,10 +2,10 @@
 
 ### Ubuntu Web Server Setup Script ###
 # Hardened, secure, production-ready
-# Fetched from GitHub repo: killerhash-stack/ubuntu-webserver-setup
+# Source: killerhash-stack/ubuntu-webserver-setup
 
 echo "🚀 Starting Web Server Setup Script"
-echo "📦 Source: https://github.com/killerhash-stack/ubuntu-webserver-setup"
+echo "📦 GitHub: https://github.com/killerhash-stack/ubuntu-webserver-setup"
 echo "🕒 Timestamp: $(date)"
 echo ""
 
@@ -69,7 +69,7 @@ apt install -y nginx php-fpm php-mysql mariadb-server
 # --- Enable HTTP/2 in Nginx ---
 sed -i 's/listen 443 ssl;/listen 443 ssl http2;/' /etc/nginx/sites-available/default
 
-# --- Certbot (interactive for domain/email) ---
+# --- Certbot (interactive) ---
 apt install -y certbot python3-certbot-nginx
 read -p "Enter your domain (example.com): " DOMAIN
 read -p "Enter your email for SSL renewal notices: " EMAIL
@@ -98,7 +98,7 @@ apt install -y libnginx-mod-security
 sed -i 's/#Include modsecurity.conf/Include modsecurity.conf/' /etc/nginx/nginx.conf
 systemctl restart nginx
 
-# --- Postfix (interactive) ---
+# --- Optional Postfix (interactive) ---
 read -p "Do you want to install Postfix for local mail? [y/N]: " INSTALL_POSTFIX
 if [[ "$INSTALL_POSTFIX" =~ ^[Yy]$ ]]; then
     read -p "Enter your mail domain (example.com): " MAIL_DOMAIN
@@ -113,23 +113,20 @@ add-apt-repository "deb http://download.webmin.com/download/repository sarge con
 apt update
 apt install -y webmin
 
-# --- Git auto-deploy setup ---
+# --- Git auto-deploy setup (fixed heredoc) ---
 DEPLOY_DIR="/var/www/$DOMAIN"
 mkdir -p $DEPLOY_DIR
 chown -R $DEPLOY_USER:$DEPLOY_USER $DEPLOY_DIR
 
-su - $DEPLOY_USER -c "
-cd ~
-mkdir -p repos && cd repos
-git init --bare $DOMAIN.git
-cd $DOMAIN.git/hooks
+su - $DEPLOY_USER -c 'mkdir -p ~/repos && cd ~/repos
+git init --bare '"$DOMAIN"'.git
+cd '"$DOMAIN"'.git/hooks
 cat > post-receive <<EOF
 #!/bin/bash
-GIT_WORK_TREE=$DEPLOY_DIR git checkout -f
+GIT_WORK_TREE='"$DEPLOY_DIR"' git checkout -f
 systemctl restart nginx
 EOF
-chmod +x post-receive
-"
+chmod +x post-receive'
 
 # --- Post-install cheat sheet ---
 echo ""
