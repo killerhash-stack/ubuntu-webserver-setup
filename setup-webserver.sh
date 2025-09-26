@@ -209,23 +209,25 @@ echo "➡️ SSH Public Key:"
 cat /home/$DEPLOYUSER/.ssh/id_ed25519.pub
 echo ""
 
-# Webmin & Netdata access instructions
+echo "🌐 Access your server:"
 if [ "$SSH_TUNNEL_REQUIRED" = true ]; then
-    echo "🔹 Webmin (remote via ZeroTier) SSH tunnel required:"
-    echo "ssh -L 10000:localhost:10000 $DEPLOYUSER@$WEBMIN_BIND_IP"
-    echo "Then open https://localhost:10000 in your browser."
-    echo ""
-    echo "🔹 Netdata (remote via ZeroTier) SSH tunnel required:"
-    echo "ssh -L 19999:localhost:19999 $DEPLOYUSER@$NETDATA_BIND_IP"
-    echo "Then open http://localhost:19999 in your browser."
+    echo " - Webmin (remote via ZeroTier) SSH tunnel required:"
+    echo "   ssh -L 10000:localhost:10000 $DEPLOYUSER@$WEBMIN_BIND_IP"
+    echo "   Then open https://localhost:10000 in your browser."
+    echo " - Netdata (remote via ZeroTier) SSH tunnel required:"
+    echo "   ssh -L 19999:localhost:19999 $DEPLOYUSER@$NETDATA_BIND_IP"
+    echo "   Then open http://localhost:19999 in your browser."
 else
-    echo "🔹 Webmin (LAN access): https://$WEBMIN_BIND_IP:10000"
-    echo "🔹 Netdata (LAN access): http://$NETDATA_BIND_IP:19999"
+    echo " - Webmin (LAN access): https://$WEBMIN_BIND_IP:10000"
+    echo " - Netdata (LAN access): http://$NETDATA_BIND_IP:19999"
 fi
 
+echo " - Nginx Root: /var/www/html"
+echo " - Fail2Ban status: systemctl status fail2ban"
+echo " - rkhunter scan: sudo rkhunter --check"
+
 if [ -n "$GITREPO" ]; then
-    echo ""
-    echo " - Git auto-deploy: /var/www/html (from https://github.com/$GITREPO)"
+    echo " - Git auto-deploy: push to https://github.com/$GITREPO"
 fi
 
 echo ""
