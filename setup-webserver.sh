@@ -1,237 +1,187 @@
 #!/bin/bash
 
-### Ubuntu Web Server Setup Script ###
-# Hardened, secure, production-ready
-# Source: https://github.com/killerhash-stack/ubuntu-webserver-setup
-# Repo: killerhash-stack/ubuntu-webserver-setup
-
-echo "🚀 Starting Web Server Setup Script"
-echo "📦 Source: https://github.com/killerhash-stack/ubuntu-webserver-setup"
-echo "🕒 Timestamp: $(date)"
-echo ""
+set -e
 
 # ----------------------------
-# Update system
+# Variables
 # ----------------------------
-apt-get update -y && apt-get upgrade -y
+read -p "Enter deploy username: " DEPLOYUSER
+read -p "Enter GitHub repository (username/repo): " GITREPO
 
 # ----------------------------
-# Create deploy user with SSH key
+# Update & Upgrade
 # ----------------------------
-read -p "Enter the username for deployment (default: deploy): " DEPLOYUSER
-DEPLOYUSER=${DEPLOYUSER:-deploy}
+sudo apt-get update -y
+sudo apt-get upgrade -y
+sudo apt-get dist-upgrade -y
+sudo apt-get autoremove -y
 
-if ! id -u "$DEPLOYUSER" >/dev/null 2>&1; then
-    adduser --disabled-password --gecos "" $DEPLOYUSER
-    usermod -aG sudo $DEPLOYUSER
-    chsh -s /bin/bash $DEPLOYUSER
-
-    mkdir -p /home/$DEPLOYUSER/.ssh
-    chmod 700 /home/$DEPLOYUSER/.ssh
-    ssh-keygen -t ed25519 -f /home/$DEPLOYUSER/.ssh/id_ed25519 -q -N ""
-    cat /home/$DEPLOYUSER/.ssh/id_ed25519.pub >> /home/$DEPLOYUSER/.ssh/authorized_keys
-    chmod 600 /home/$DEPLOYUSER/.ssh/authorized_keys
-    chown -R $DEPLOYUSER:$DEPLOYUSER /home/$DEPLOYUSER/.ssh
-    echo "✅ SSH key generated for $DEPLOYUSER and shell set to /bin/bash"
+# ----------------------------
+# Create non-root user
+# ----------------------------
+if ! id "$DEPLOYUSER" &>/dev/null; then
+    sudo adduser --gecos "" "$DEPLOYUSER"
+    sudo usermod -aG sudo "$DEPLOYUSER"
+    echo "✅ User $DEPLOYUSER created."
 fi
 
 # ----------------------------
-# Install essentials
+# SSH Key Setup
 # ----------------------------
-apt-get install -y openssh-server ufw fail2ban unattended-upgrades \
-    curl wget git gnupg2 ca-certificates lsb-release software-properties-common
+if [ ! -f /home/$DEPLOYUSER/.ssh/id_ed25519.pub ]; then
+    sudo -u $DEPLOYUSER ssh-keygen -t ed25519 -f /home/$DEPLOYUSER/.ssh/id_ed25519 -N ""
+    echo "✅ SSH key generated for $DEPLOYUSER."
+fi
 
 # ----------------------------
-# Configure UFW (explicit ports)
+# Install essential packages
 # ----------------------------
-ufw allow OpenSSH
-ufw allow 80/tcp
-ufw allow 443/tcp
-ufw --force enable
+sudo apt-get install -y curl git ufw fail2ban rkhunter unattended-upgrades software-properties-common apt-transport-https lsb-release gnupg
 
 # ----------------------------
-# Install latest Nginx mainline + ModSecurity
+# UFW Firewall setup
 # ----------------------------
-curl -fsSL https://nginx.org/keys/nginx_signing.key | sudo gpg --dearmor -o /usr/share/keyrings/nginx-archive-keyring.gpg
-echo "deb [signed-by=/usr/share/keyrings/nginx-archive-keyring.gpg] http://nginx.org/packages/mainline/ubuntu $(lsb_release -cs) nginx" \
-    | sudo tee /etc/apt/sources.list.d/nginx.list
-
-apt-get update -y
-apt-get install -y nginx libnginx-mod-security
+sudo ufw allow OpenSSH
+sudo ufw allow 80
+sudo ufw allow 443
+sudo ufw --force enable
 
 # ----------------------------
-# Enable HTTP/2 in default config
+# Unattended upgrades
 # ----------------------------
-NGINX_CONF="/etc/nginx/sites-available/default"
-cat > $NGINX_CONF <<EOL
-server {
-    listen 80 default_server;
-    listen [::]:80 default_server;
-    server_name _;
-    root /var/www/html;
-    index index.html index.htm;
-
-    location / {
-        try_files \$uri \$uri/ =404;
-    }
-}
-EOL
+sudo dpkg-reconfigure --priority=low unattended-upgrades
 
 # ----------------------------
-# Harden Nginx Security Headers
+# Install Nginx & HTTP/2
 # ----------------------------
-cat > /etc/nginx/conf.d/security-headers.conf <<EOL
-add_header X-Frame-Options "SAMEORIGIN" always;
-add_header X-Content-Type-Options "nosniff" always;
-add_header Referrer-Policy "no-referrer-when-downgrade" always;
-add_header Content-Security-Policy "default-src 'self'; frame-ancestors 'self';" always;
-add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
-add_header Permissions-Policy "geolocation=(), microphone=(), camera=()" always;
-EOL
+sudo apt-get install -y nginx
+sudo sed -i 's/listen 80 default_server;/listen 80 default_server;\n    listen 443 ssl http2 default_server;/' /etc/nginx/sites-available/default
+sudo systemctl enable nginx
+sudo systemctl restart nginx
 
 # ----------------------------
-# Install Certbot for SSL (non-interactive)
+# Install Certbot (SSL)
 # ----------------------------
-apt-get install -y certbot python3-certbot-nginx
+sudo apt-get install -y certbot python3-certbot-nginx
+echo "✅ Certbot installed."
 
-read -p "Enter your domain for SSL (leave blank to skip): " DOMAIN
-read -p "Enter your email for SSL certificate registration: " EMAIL
-if [ -n "$DOMAIN" ] && [ -n "$EMAIL" ]; then
-    nginx -t
-    certbot --nginx -d $DOMAIN --redirect --agree-tos --no-eff-email -m $EMAIL --non-interactive
-    systemctl enable certbot.timer
-    echo "✅ SSL installed and auto-renewal enabled for $DOMAIN."
+# ----------------------------
+# ModSecurity (OWASP CRS)
+# ----------------------------
+sudo apt-get install -y libnginx-mod-security
+sudo cp /usr/share/modsecurity-crs/modsecurity_crs_10_setup.conf.example /etc/modsecurity/modsecurity_crs_10_setup.conf
+sudo systemctl restart nginx || echo "⚠️ Nginx restart warning (check config)."
+
+# ----------------------------
+# Webmin Installation & Service Handling
+# ----------------------------
+if ! dpkg -l | grep -q webmin; then
+    sudo mkdir -p /usr/share/keyrings
+    curl -fsSL https://download.webmin.com/jcameron-key.asc | sudo gpg --dearmor -o /usr/share/keyrings/webmin.gpg
+    echo "deb [signed-by=/usr/share/keyrings/webmin.gpg] https://download.webmin.com/download/repository sarge contrib" \
+        | sudo tee /etc/apt/sources.list.d/webmin.list
+    sudo apt-get update -y
+    sudo apt-get install -y webmin
 else
-    echo "⚠️ Skipped SSL setup (domain or email not provided)."
+    echo "✅ Webmin already installed."
+fi
+
+if systemctl list-unit-files | grep -q "^webmin.service"; then
+    sudo systemctl enable webmin
+    sudo systemctl restart webmin
+    echo "✅ Webmin service started and enabled."
+else
+    echo "⚠️ Webmin service not found. Check installation."
 fi
 
 # ----------------------------
-# Install Postfix (Interactive)
+# Netdata Installation & Service Handling
 # ----------------------------
-echo "📧 Installing Postfix (you will be prompted for config)..."
-DEBIAN_FRONTEND=noninteractive apt-get install -y postfix
+if ! command -v netdata &>/dev/null; then
+    bash <(curl -Ss https://my-netdata.io/kickstart.sh) --disable-telemetry
+else
+    echo "✅ Netdata already installed."
+fi
 
-# ----------------------------
-# Setup root alias to deploy user
-# ----------------------------
-ALIASES_FILE="/etc/aliases"
-if ! grep -q "^root: $DEPLOYUSER" $ALIASES_FILE; then
-    echo "root: $DEPLOYUSER" >> $ALIASES_FILE
-    newaliases
-    echo "✅ Root alias added: root → $DEPLOYUSER"
+if systemctl list-unit-files | grep -q "^netdata.service"; then
+    sudo systemctl enable netdata
+    sudo systemctl restart netdata
+    echo "✅ Netdata service started and enabled."
+else
+    echo "⚠️ Netdata service not found. Check installation."
 fi
 
 # ----------------------------
-# Install rkhunter
+# rkhunter update
 # ----------------------------
-apt-get install -y rkhunter
-rkhunter --update
+sudo rkhunter --update
 
 # ----------------------------
-# Install Webmin
+# Git Auto-Deploy
 # ----------------------------
-sudo mkdir -p /usr/share/keyrings
-curl -fsSL https://download.webmin.com/jcameron-key.asc | sudo gpg --dearmor -o /usr/share/keyrings/webmin.gpg
-echo "deb [signed-by=/usr/share/keyrings/webmin.gpg] https://download.webmin.com/download/repository sarge contrib" \
-    | sudo tee /etc/apt/sources.list.d/webmin.list
-apt-get update -y
-apt-get install -y webmin
+if [ -n "$GITREPO" ]; then
+    if [ ! -d /var/www/html/.git ]; then
+        sudo git clone https://github.com/$GITREPO /var/www/html
+        echo "✅ Git repository cloned."
+    else
+        echo "✅ Git repository already exists."
+    fi
+fi
 
 # ----------------------------
-# Smart Webmin & Netdata binding: LAN vs ZeroTier
+# Internal IP detection
 # ----------------------------
 INTERNAL_IP=$(hostname -I | awk '{print $1}')
-ZEROTIER_IP=$(ip addr show zt0 2>/dev/null | grep 'inet ' | awk '{print $2}' | cut -d/ -f1)
-
-WEBMIN_BIND_IP=$INTERNAL_IP
-NETDATA_BIND_IP=$INTERNAL_IP
-SSH_TUNNEL_REQUIRED=false
-
-if [ -n "$ZEROTIER_IP" ]; then
-    WEBMIN_BIND_IP=$ZEROTIER_IP
-    NETDATA_BIND_IP=$ZEROTIER_IP
-    SSH_TUNNEL_REQUIRED=true
-    echo "⚠️ ZeroTier detected: remote access via SSH tunnel is recommended"
-fi
-
-# Update Webmin
-sed -i "s/^port=10000/port=10000\nbind=$WEBMIN_BIND_IP/" /etc/webmin/miniserv.conf
-systemctl restart webmin
 
 # ----------------------------
-# Install Netdata monitoring
-# ----------------------------
-bash <(curl -Ss https://my-netdata.io/kickstart.sh) --disable-telemetry
-sed -i "s/^bind to = .*/bind to = $NETDATA_BIND_IP/" /etc/netdata/netdata.conf
-systemctl restart netdata
-
-# ----------------------------
-# Install OWASP ModSecurity Core Rule Set (CRS)
-# ----------------------------
-apt-get install -y modsecurity-crs
-MODSEC_CONF="/etc/nginx/modsec/main.conf"
-if [ -f "$MODSEC_CONF" ]; then
-    echo "Include /usr/share/modsecurity-crs/*.conf" >> $MODSEC_CONF
-    systemctl restart nginx
-fi
-
-# ----------------------------
-# Setup Git Auto-Deploy
-# ----------------------------
-DEPLOY_DIR="/var/www/html"
-read -p "Enter your GitHub repo (format: user/repo, leave blank to skip): " GITREPO
-if [ -n "$GITREPO" ]; then
-    apt-get install -y git
-    sudo -u $DEPLOYUSER git clone https://github.com/$GITREPO.git $DEPLOY_DIR
-    echo "✅ Auto-deploy setup complete. Push updates to GitHub to redeploy."
-fi
-
-# ----------------------------
-# Restart services safely
-# ----------------------------
-if systemctl list-units --full -all | grep -q nginx.service; then
-    systemctl restart nginx
-else
-    echo "⚠️ Nginx service not found. Skipping restart."
-fi
-
-systemctl restart ssh
-systemctl restart fail2ban
-
-# ----------------------------
-# Final summary
+# Final Access Summary
 # ----------------------------
 echo ""
-echo "🎉 Setup complete!"
-echo ""
-echo "➡️ SSH User: $DEPLOYUSER"
-echo "➡️ SSH Public Key:"
-cat /home/$DEPLOYUSER/.ssh/id_ed25519.pub
-echo ""
-
 echo "🌐 Access your server:"
-if [ "$SSH_TUNNEL_REQUIRED" = true ]; then
-    echo " - Webmin (remote via ZeroTier) SSH tunnel required:"
-    echo "   ssh -L 10000:localhost:10000 $DEPLOYUSER@$WEBMIN_BIND_IP"
-    echo "   Then open https://localhost:10000 in your browser."
-    echo " - Netdata (remote via ZeroTier) SSH tunnel required:"
-    echo "   ssh -L 19999:localhost:19999 $DEPLOYUSER@$NETDATA_BIND_IP"
-    echo "   Then open http://localhost:19999 in your browser."
+echo ""
+# Webmin
+if systemctl list-unit-files | grep -q "^webmin.service"; then
+    echo " - Webmin: https://$INTERNAL_IP:10000"
+    echo "   🔑 Use SSH tunnel if remote over ZeroTier:"
+    echo "     ssh -L 10000:localhost:10000 $DEPLOYUSER@YOUR_SERVER_PUBLIC_IP_OR_ZEROTIER_IP"
+    echo "     Then open https://localhost:10000 in your browser."
 else
-    echo " - Webmin (LAN access): https://$WEBMIN_BIND_IP:10000"
-    echo " - Netdata (LAN access): http://$NETDATA_BIND_IP:19999"
+    echo " - Webmin: ⚠️ Not installed or service missing."
 fi
 
+# Netdata
+if systemctl list-unit-files | grep -q "^netdata.service"; then
+    echo ""
+    echo " - Netdata: http://$INTERNAL_IP:19999"
+    echo "   🔑 Use SSH tunnel if remote over ZeroTier:"
+    echo "     ssh -L 19999:localhost:19999 $DEPLOYUSER@YOUR_SERVER_PUBLIC_IP_OR_ZEROTIER_IP"
+    echo "     Then open http://localhost:19999 in your browser."
+else
+    echo " - Netdata: ⚠️ Not installed or service missing."
+fi
+
+# Nginx root
+echo ""
 echo " - Nginx Root: /var/www/html"
-echo " - Fail2Ban status: systemctl status fail2ban"
+
+# Fail2Ban
+echo " - Fail2Ban: systemctl status fail2ban"
+
+# rkhunter
 echo " - rkhunter scan: sudo rkhunter --check"
 
+# Git auto-deploy
 if [ -n "$GITREPO" ]; then
     echo " - Git auto-deploy: push to https://github.com/$GITREPO"
 fi
 
+# ModSecurity / WAF
 echo ""
 echo "🛡️ ModSecurity WAF is active with OWASP CRS rules"
 echo "Check Nginx logs for blocked requests: sudo tail -f /var/log/nginx/modsec_audit.log"
+
+# SSL reminder
 echo ""
 echo "⚠️ Reminder: Update DNS (Cloudflare) to point your domain to this server for SSL to work."
+echo ""
+echo "✅ Setup complete!"
