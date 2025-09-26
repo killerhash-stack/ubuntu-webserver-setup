@@ -128,7 +128,7 @@ apt-get install -y rkhunter
 rkhunter --update
 
 # ----------------------------
-# Install Webmin (secure HTTPS key)
+# Install Webmin
 # ----------------------------
 sudo mkdir -p /usr/share/keyrings
 curl -fsSL https://download.webmin.com/jcameron-key.asc | sudo gpg --dearmor -o /usr/share/keyrings/webmin.gpg
@@ -187,7 +187,7 @@ if [ -n "$GITREPO" ]; then
 fi
 
 # ----------------------------
-# Restart services with safety check
+# Restart services safely
 # ----------------------------
 if systemctl list-units --full -all | grep -q nginx.service; then
     systemctl restart nginx
