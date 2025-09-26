@@ -1,5 +1,4 @@
 #!/bin/bash
-
 set -e
 
 # ----------------------------
@@ -73,12 +72,12 @@ sudo cp /usr/share/modsecurity-crs/modsecurity_crs_10_setup.conf.example /etc/mo
 sudo systemctl restart nginx || echo "⚠️ Nginx restart warning (check config)."
 
 # ----------------------------
-# Webmin Installation & Service Handling
+# Webmin Installation & Service Handling (modern repo)
 # ----------------------------
 if ! dpkg -l | grep -q webmin; then
     sudo mkdir -p /usr/share/keyrings
-    curl -fsSL https://download.webmin.com/jcameron-key.asc | sudo gpg --dearmor -o /usr/share/keyrings/webmin.gpg
-    echo "deb [signed-by=/usr/share/keyrings/webmin.gpg] https://download.webmin.com/download/repository sarge contrib" \
+    curl -fsSL https://download.webmin.com/jcameron-key.asc | sudo gpg --dearmor -o /usr/share/keyrings/webmin-archive-keyring.gpg
+    echo "deb [signed-by=/usr/share/keyrings/webmin-archive-keyring.gpg] https://download.webmin.com/download/repository bullseye contrib" \
         | sudo tee /etc/apt/sources.list.d/webmin.list
     sudo apt-get update -y
     sudo apt-get install -y webmin
