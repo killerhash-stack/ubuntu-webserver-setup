@@ -24,13 +24,16 @@ DEPLOYUSER=${DEPLOYUSER:-deploy}
 if ! id -u "$DEPLOYUSER" >/dev/null 2>&1; then
     adduser --disabled-password --gecos "" $DEPLOYUSER
     usermod -aG sudo $DEPLOYUSER
+    # Set the shell to /bin/bash so Webmin works properly
+    chsh -s /bin/bash $DEPLOYUSER
+
     mkdir -p /home/$DEPLOYUSER/.ssh
     chmod 700 /home/$DEPLOYUSER/.ssh
     ssh-keygen -t ed25519 -f /home/$DEPLOYUSER/.ssh/id_ed25519 -q -N ""
     cat /home/$DEPLOYUSER/.ssh/id_ed25519.pub >> /home/$DEPLOYUSER/.ssh/authorized_keys
     chmod 600 /home/$DEPLOYUSER/.ssh/authorized_keys
     chown -R $DEPLOYUSER:$DEPLOYUSER /home/$DEPLOYUSER/.ssh
-    echo "✅ SSH key generated for $DEPLOYUSER"
+    echo "✅ SSH key generated for $DEPLOYUSER and shell set to /bin/bash"
 fi
 
 # ----------------------------
@@ -40,10 +43,11 @@ apt-get install -y openssh-server ufw fail2ban unattended-upgrades \
     curl wget git gnupg2 ca-certificates lsb-release software-properties-common
 
 # ----------------------------
-# Configure UFW
+# Configure UFW (explicit ports)
 # ----------------------------
 ufw allow OpenSSH
-ufw allow "Nginx Full"
+ufw allow 80/tcp
+ufw allow 443/tcp
 ufw --force enable
 
 # ----------------------------
@@ -95,7 +99,17 @@ fi
 # Install Postfix (Interactive)
 # ----------------------------
 echo "📧 Installing Postfix (you will be prompted for config)..."
-DEBIAN_FRONTEND= apt-get install -y postfix
+DEBIAN_FRONTEND=noninteractive apt-get install -y postfix
+
+# ----------------------------
+# Setup root alias to deploy user
+# ----------------------------
+ALIASES_FILE="/etc/aliases"
+if ! grep -q "^root: $DEPLOYUSER" $ALIASES_FILE; then
+    echo "root: $DEPLOYUSER" >> $ALIASES_FILE
+    newaliases
+    echo "✅ Root alias added: root → $DEPLOYUSER"
+fi
 
 # ----------------------------
 # Install rkhunter
@@ -104,11 +118,12 @@ apt-get install -y rkhunter
 rkhunter --update
 
 # ----------------------------
-# Install Webmin (with new GPG method)
+# Install Webmin (secure HTTPS key)
 # ----------------------------
-curl -fsSL http://www.webmin.com/jcameron-key.asc | gpg --dearmor -o /usr/share/keyrings/webmin.gpg
-echo "deb [signed-by=/usr/share/keyrings/webmin.gpg] http://download.webmin.com/download/repository sarge contrib" \
-    | tee /etc/apt/sources.list.d/webmin.list
+sudo mkdir -p /usr/share/keyrings
+curl -fsSL https://download.webmin.com/jcameron-key.asc | sudo gpg --dearmor -o /usr/share/keyrings/webmin.gpg
+echo "deb [signed-by=/usr/share/keyrings/webmin.gpg] https://download.webmin.com/download/repository sarge contrib" \
+    | sudo tee /etc/apt/sources.list.d/webmin.list
 apt-get update -y
 apt-get install -y webmin
 
@@ -131,6 +146,14 @@ systemctl restart nginx
 systemctl restart fail2ban
 
 # ----------------------------
+# Detect server public IP
+# ----------------------------
+PUBLIC_IP=$(curl -s https://api.ipify.org)
+if [ -z "$PUBLIC_IP" ]; then
+    PUBLIC_IP="YOUR_SERVER_IP"
+fi
+
+# ----------------------------
 # Summary
 # ----------------------------
 echo ""
@@ -141,7 +164,7 @@ echo "➡️ SSH Public Key:"
 cat /home/$DEPLOYUSER/.ssh/id_ed25519.pub
 echo ""
 echo "🌐 Access your server:"
-echo " - Webmin: https://YOUR_SERVER_IP:10000"
+echo " - Webmin: https://$PUBLIC_IP:10000"
 echo " - Nginx Root: /var/www/html"
 echo " - Fail2Ban: systemctl status fail2ban"
 echo " - rkhunter scan: sudo rkhunter --check"
