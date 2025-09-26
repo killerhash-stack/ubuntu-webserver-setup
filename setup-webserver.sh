@@ -127,6 +127,17 @@ echo "deb [signed-by=/usr/share/keyrings/webmin.gpg] https://download.webmin.com
 apt-get update -y
 apt-get install -y webmin
 
+# Bind Webmin to internal IP only
+INTERNAL_IP=$(hostname -I | awk '{print $1}')
+if [ -n "$INTERNAL_IP" ]; then
+    sed -i "s/port=10000/port=10000\nbind=$INTERNAL_IP/" /etc/webmin/miniserv.conf
+    if systemctl list-units --full -all | grep -q webmin.service; then
+        systemctl restart webmin
+    else
+        echo "⚠️ Webmin service not found. Skipping restart."
+    fi
+fi
+
 # ----------------------------
 # Setup Git Auto-Deploy
 # ----------------------------
@@ -139,19 +150,16 @@ if [ -n "$GITREPO" ]; then
 fi
 
 # ----------------------------
-# Restart services
+# Restart services with safety check
 # ----------------------------
-systemctl restart ssh
-systemctl restart nginx
-systemctl restart fail2ban
-
-# ----------------------------
-# Detect server public IP
-# ----------------------------
-PUBLIC_IP=$(curl -s https://api.ipify.org)
-if [ -z "$PUBLIC_IP" ]; then
-    PUBLIC_IP="YOUR_SERVER_IP"
+if systemctl list-units --full -all | grep -q nginx.service; then
+    systemctl restart nginx
+else
+    echo "⚠️ Nginx service not found. Skipping restart."
 fi
+
+systemctl restart ssh
+systemctl restart fail2ban
 
 # ----------------------------
 # Summary
@@ -164,7 +172,10 @@ echo "➡️ SSH Public Key:"
 cat /home/$DEPLOYUSER/.ssh/id_ed25519.pub
 echo ""
 echo "🌐 Access your server:"
-echo " - Webmin: https://$PUBLIC_IP:10000"
+echo " - Webmin (internal only): https://$INTERNAL_IP:10000"
+echo "   🔑 To access Webmin from your local machine, use SSH tunnel:"
+echo "   ssh -L 10000:localhost:10000 $DEPLOYUSER@YOUR_SERVER_PUBLIC_IP"
+echo "   Then open https://localhost:10000 in your browser."
 echo " - Nginx Root: /var/www/html"
 echo " - Fail2Ban: systemctl status fail2ban"
 echo " - rkhunter scan: sudo rkhunter --check"
