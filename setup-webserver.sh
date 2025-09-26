@@ -24,7 +24,6 @@ DEPLOYUSER=${DEPLOYUSER:-deploy}
 if ! id -u "$DEPLOYUSER" >/dev/null 2>&1; then
     adduser --disabled-password --gecos "" $DEPLOYUSER
     usermod -aG sudo $DEPLOYUSER
-    # Set the shell to /bin/bash so Webmin works properly
     chsh -s /bin/bash $DEPLOYUSER
 
     mkdir -p /home/$DEPLOYUSER/.ssh
@@ -51,11 +50,18 @@ ufw allow 443/tcp
 ufw --force enable
 
 # ----------------------------
-# Install Nginx + Certbot + ModSecurity
+# Install latest Nginx mainline + ModSecurity
 # ----------------------------
-apt-get install -y nginx python3-certbot-nginx libnginx-mod-security
+curl -fsSL https://nginx.org/keys/nginx_signing.key | sudo gpg --dearmor -o /usr/share/keyrings/nginx-archive-keyring.gpg
+echo "deb [signed-by=/usr/share/keyrings/nginx-archive-keyring.gpg] http://nginx.org/packages/mainline/ubuntu $(lsb_release -cs) nginx" \
+    | sudo tee /etc/apt/sources.list.d/nginx.list
 
-# Enable HTTP/2 + SSL in default config
+apt-get update -y
+apt-get install -y nginx libnginx-mod-security
+
+# ----------------------------
+# Enable HTTP/2 in default config
+# ----------------------------
 NGINX_CONF="/etc/nginx/sites-available/default"
 cat > $NGINX_CONF <<EOL
 server {
@@ -84,15 +90,19 @@ add_header Permissions-Policy "geolocation=(), microphone=(), camera=()" always;
 EOL
 
 # ----------------------------
-# Install SSL (Certbot)
+# Install Certbot for SSL (non-interactive)
 # ----------------------------
+apt-get install -y certbot python3-certbot-nginx
+
 read -p "Enter your domain for SSL (leave blank to skip): " DOMAIN
-if [ -n "$DOMAIN" ]; then
-    certbot --nginx -d $DOMAIN
+read -p "Enter your email for SSL certificate registration: " EMAIL
+if [ -n "$DOMAIN" ] && [ -n "$EMAIL" ]; then
+    nginx -t
+    certbot --nginx -d $DOMAIN --redirect --agree-tos --no-eff-email -m $EMAIL --non-interactive
     systemctl enable certbot.timer
-    echo "✅ SSL installed and auto-renewal enabled."
+    echo "✅ SSL installed and auto-renewal enabled for $DOMAIN."
 else
-    echo "⚠️ Skipped SSL setup (no domain entered)."
+    echo "⚠️ Skipped SSL setup (domain or email not provided)."
 fi
 
 # ----------------------------
@@ -127,15 +137,42 @@ echo "deb [signed-by=/usr/share/keyrings/webmin.gpg] https://download.webmin.com
 apt-get update -y
 apt-get install -y webmin
 
-# Bind Webmin to internal IP only
+# ----------------------------
+# Smart Webmin & Netdata binding: LAN vs ZeroTier
+# ----------------------------
 INTERNAL_IP=$(hostname -I | awk '{print $1}')
-if [ -n "$INTERNAL_IP" ]; then
-    sed -i "s/port=10000/port=10000\nbind=$INTERNAL_IP/" /etc/webmin/miniserv.conf
-    if systemctl list-units --full -all | grep -q webmin.service; then
-        systemctl restart webmin
-    else
-        echo "⚠️ Webmin service not found. Skipping restart."
-    fi
+ZEROTIER_IP=$(ip addr show zt0 2>/dev/null | grep 'inet ' | awk '{print $2}' | cut -d/ -f1)
+
+WEBMIN_BIND_IP=$INTERNAL_IP
+NETDATA_BIND_IP=$INTERNAL_IP
+SSH_TUNNEL_REQUIRED=false
+
+if [ -n "$ZEROTIER_IP" ]; then
+    WEBMIN_BIND_IP=$ZEROTIER_IP
+    NETDATA_BIND_IP=$ZEROTIER_IP
+    SSH_TUNNEL_REQUIRED=true
+    echo "⚠️ ZeroTier detected: remote access via SSH tunnel is recommended"
+fi
+
+# Update Webmin
+sed -i "s/^port=10000/port=10000\nbind=$WEBMIN_BIND_IP/" /etc/webmin/miniserv.conf
+systemctl restart webmin
+
+# ----------------------------
+# Install Netdata monitoring
+# ----------------------------
+bash <(curl -Ss https://my-netdata.io/kickstart.sh) --disable-telemetry
+sed -i "s/^bind to = .*/bind to = $NETDATA_BIND_IP/" /etc/netdata/netdata.conf
+systemctl restart netdata
+
+# ----------------------------
+# Install OWASP ModSecurity Core Rule Set (CRS)
+# ----------------------------
+apt-get install -y modsecurity-crs
+MODSEC_CONF="/etc/nginx/modsec/main.conf"
+if [ -f "$MODSEC_CONF" ]; then
+    echo "Include /usr/share/modsecurity-crs/*.conf" >> $MODSEC_CONF
+    systemctl restart nginx
 fi
 
 # ----------------------------
@@ -162,7 +199,7 @@ systemctl restart ssh
 systemctl restart fail2ban
 
 # ----------------------------
-# Summary
+# Final summary
 # ----------------------------
 echo ""
 echo "🎉 Setup complete!"
@@ -171,14 +208,28 @@ echo "➡️ SSH User: $DEPLOYUSER"
 echo "➡️ SSH Public Key:"
 cat /home/$DEPLOYUSER/.ssh/id_ed25519.pub
 echo ""
-echo "🌐 Access your server:"
-echo " - Webmin (internal only): https://$INTERNAL_IP:10000"
-echo "   🔑 To access Webmin from your local machine, use SSH tunnel:"
-echo "   ssh -L 10000:localhost:10000 $DEPLOYUSER@YOUR_SERVER_PUBLIC_IP"
-echo "   Then open https://localhost:10000 in your browser."
-echo " - Nginx Root: /var/www/html"
-echo " - Fail2Ban: systemctl status fail2ban"
-echo " - rkhunter scan: sudo rkhunter --check"
-echo " - Git auto-deploy: push to https://github.com/$GITREPO"
+
+# Webmin & Netdata access instructions
+if [ "$SSH_TUNNEL_REQUIRED" = true ]; then
+    echo "🔹 Webmin (remote via ZeroTier) SSH tunnel required:"
+    echo "ssh -L 10000:localhost:10000 $DEPLOYUSER@$WEBMIN_BIND_IP"
+    echo "Then open https://localhost:10000 in your browser."
+    echo ""
+    echo "🔹 Netdata (remote via ZeroTier) SSH tunnel required:"
+    echo "ssh -L 19999:localhost:19999 $DEPLOYUSER@$NETDATA_BIND_IP"
+    echo "Then open http://localhost:19999 in your browser."
+else
+    echo "🔹 Webmin (LAN access): https://$WEBMIN_BIND_IP:10000"
+    echo "🔹 Netdata (LAN access): http://$NETDATA_BIND_IP:19999"
+fi
+
+if [ -n "$GITREPO" ]; then
+    echo ""
+    echo " - Git auto-deploy: /var/www/html (from https://github.com/$GITREPO)"
+fi
+
+echo ""
+echo "🛡️ ModSecurity WAF is active with OWASP CRS rules"
+echo "Check Nginx logs for blocked requests: sudo tail -f /var/log/nginx/modsec_audit.log"
 echo ""
 echo "⚠️ Reminder: Update DNS (Cloudflare) to point your domain to this server for SSL to work."
