@@ -1,143 +1,156 @@
 #!/bin/bash
 set -e
 
-# ----------------------------
-# Variables
-# ----------------------------
-read -p "Enter deploy username: " DEPLOYUSER
-read -p "Enter GitHub repository (username/repo): " GITREPO
+echo "🚀 Ubuntu Web Server Setup Starting..."
 
-# ----------------------------
-# Update & Upgrade
-# ----------------------------
-sudo apt-get update -y
-sudo apt-get upgrade -y
-sudo apt-get dist-upgrade -y
-sudo apt-get autoremove -y
+# ============================
+# Update and Upgrade System
+# ============================
+apt-get update -y && apt-get upgrade -y
 
-# ----------------------------
-# Create non-root user
-# ----------------------------
-if ! id "$DEPLOYUSER" &>/dev/null; then
-    sudo adduser --gecos "" "$DEPLOYUSER"
-    sudo usermod -aG sudo "$DEPLOYUSER"
-    echo "✅ User $DEPLOYUSER created."
+# ============================
+# Prompt for deploy user
+# ============================
+read -p "Enter the name for the deploy user: " DEPLOYUSER
+
+# ============================
+# Create deploy user
+# ============================
+if ! id -u "$DEPLOYUSER" >/dev/null 2>&1; then
+    adduser --disabled-password --gecos "" $DEPLOYUSER
+    usermod -aG sudo $DEPLOYUSER
 fi
 
-# ----------------------------
+# ============================
 # SSH Key Setup
-# ----------------------------
-if [ ! -f /home/$DEPLOYUSER/.ssh/id_ed25519.pub ]; then
-    sudo -u $DEPLOYUSER ssh-keygen -t ed25519 -f /home/$DEPLOYUSER/.ssh/id_ed25519 -N ""
-    echo "✅ SSH key generated for $DEPLOYUSER."
-fi
+# ============================
+mkdir -p /home/$DEPLOYUSER/.ssh
+chmod 700 /home/$DEPLOYUSER/.ssh
+read -p "Paste your SSH public key: " SSHKEY
+echo "$SSHKEY" > /home/$DEPLOYUSER/.ssh/authorized_keys
+chmod 600 /home/$DEPLOYUSER/.ssh/authorized_keys
+chown -R $DEPLOYUSER:$DEPLOYUSER /home/$DEPLOYUSER/.ssh
 
-# ----------------------------
-# Install essential packages
-# ----------------------------
-sudo apt-get install -y curl git ufw fail2ban rkhunter unattended-upgrades software-properties-common apt-transport-https lsb-release gnupg
+# Harden SSH
+sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config
+sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
+systemctl restart ssh
 
-# ----------------------------
-# UFW Firewall setup
-# ----------------------------
-sudo ufw allow OpenSSH
-sudo ufw allow 80
-sudo ufw allow 443
-sudo ufw --force enable
+# ============================
+# Install Essentials
+# ============================
+apt-get install -y \
+    nginx \
+    software-properties-common \
+    ufw \
+    fail2ban \
+    git \
+    curl \
+    wget \
+    unzip \
+    unattended-upgrades \
+    apt-listchanges \
+    rkhunter
 
-# ----------------------------
-# Unattended upgrades
-# ----------------------------
-sudo dpkg-reconfigure --priority=low unattended-upgrades
+# ============================
+# Enable Firewall
+# ============================
+ufw allow OpenSSH
+ufw allow 'Nginx Full'
+ufw --force enable
 
-# ----------------------------
-# Install Nginx & HTTP/2
-# ----------------------------
-sudo apt-get install -y nginx
-sudo sed -i 's/listen 80 default_server;/listen 80 default_server;\n    listen 443 ssl http2 default_server;/' /etc/nginx/sites-available/default
-sudo systemctl enable nginx
-sudo systemctl restart nginx
+# ============================
+# Configure unattended upgrades
+# ============================
+dpkg-reconfigure -plow unattended-upgrades
 
-# ----------------------------
+# ============================
 # Install Certbot (SSL)
-# ----------------------------
-sudo apt-get install -y certbot python3-certbot-nginx
-echo "✅ Certbot installed."
+# ============================
+apt-get install -y certbot python3-certbot-nginx
 
-# ----------------------------
-# ModSecurity (OWASP CRS)
-# ----------------------------
-sudo apt-get install -y libnginx-mod-security
-sudo cp /usr/share/modsecurity-crs/modsecurity_crs_10_setup.conf.example /etc/modsecurity/modsecurity_crs_10_setup.conf
-sudo systemctl restart nginx || echo "⚠️ Nginx restart warning (check config)."
+# ============================
+# Install ModSecurity + OWASP CRS
+# ============================
+apt-get install -y libnginx-mod-security2
+cp /etc/nginx/modsecurity/modsecurity.conf-recommended /etc/nginx/modsecurity/modsecurity.conf
+sed -i 's/SecRuleEngine DetectionOnly/SecRuleEngine On/' /etc/nginx/modsecurity/modsecurity.conf
+wget https://github.com/coreruleset/coreruleset/archive/refs/heads/v3.3/master.zip -O /tmp/owasp-crs.zip
+unzip /tmp/owasp-crs.zip -d /etc/nginx/
+mv /etc/nginx/coreruleset-*/ /etc/nginx/owasp-crs
+cp /etc/nginx/owasp-crs/crs-setup.conf.example /etc/nginx/owasp-crs/crs-setup.conf
 
-# ----------------------------
-# Webmin Installation & Service Handling (modern repo)
-# ----------------------------
-if ! dpkg -l | grep -q webmin; then
-    sudo mkdir -p /usr/share/keyrings
-    curl -fsSL https://download.webmin.com/jcameron-key.asc | sudo gpg --dearmor -o /usr/share/keyrings/webmin-archive-keyring.gpg
-    echo "deb [signed-by=/usr/share/keyrings/webmin-archive-keyring.gpg] https://download.webmin.com/download/repository bullseye contrib" \
-        | sudo tee /etc/apt/sources.list.d/webmin.list
-    sudo apt-get update -y
-    sudo apt-get install -y webmin
-else
-    echo "✅ Webmin already installed."
-fi
+cat > /etc/nginx/modsec/main.conf <<EOL
+Include /etc/nginx/modsecurity/modsecurity.conf
+Include /etc/nginx/owasp-crs/crs-setup.conf
+Include /etc/nginx/owasp-crs/rules/*.conf
+EOL
 
-if systemctl list-unit-files | grep -q "^webmin.service"; then
-    sudo systemctl enable webmin
-    sudo systemctl restart webmin
-    echo "✅ Webmin service started and enabled."
-else
-    echo "⚠️ Webmin service not found. Check installation."
-fi
+sed -i '/http {/a \    modsecurity on;\n    modsecurity_rules_file /etc/nginx/modsec/main.conf;' /etc/nginx/nginx.conf
 
-# ----------------------------
-# Netdata Installation & Service Handling
-# ----------------------------
-if ! command -v netdata &>/dev/null; then
-    bash <(curl -Ss https://my-netdata.io/kickstart.sh) --disable-telemetry
-else
-    echo "✅ Netdata already installed."
-fi
+# ============================
+# Enable HTTP/2 + Security Headers
+# ============================
+sed -i 's/listen 80 default_server;/listen 80 default_server;\n    listen [::]:80 default_server;\n    listen 443 ssl http2 default_server;\n    listen [::]:443 ssl http2 default_server;/' /etc/nginx/sites-available/default
 
-if systemctl list-unit-files | grep -q "^netdata.service"; then
-    sudo systemctl enable netdata
-    sudo systemctl restart netdata
-    echo "✅ Netdata service started and enabled."
-else
-    echo "⚠️ Netdata service not found. Check installation."
-fi
+cat > /etc/nginx/snippets/security-headers.conf <<EOL
+add_header X-Frame-Options "SAMEORIGIN" always;
+add_header X-Content-Type-Options "nosniff" always;
+add_header X-XSS-Protection "1; mode=block" always;
+add_header Referrer-Policy "no-referrer-when-downgrade" always;
+add_header Permissions-Policy "geolocation=(), microphone=(), camera=()" always;
+EOL
 
-# ----------------------------
-# rkhunter update
-# ----------------------------
-sudo rkhunter --update
+sed -i '/server_name _;/a \    include snippets/security-headers.conf;' /etc/nginx/sites-available/default
 
-# ----------------------------
-# Git Auto-Deploy
-# ----------------------------
-if [ -n "$GITREPO" ]; then
-    if [ ! -d /var/www/html/.git ]; then
-        sudo git clone https://github.com/$GITREPO /var/www/html
-        echo "✅ Git repository cloned."
-    else
-        echo "✅ Git repository already exists."
-    fi
-fi
+# ============================
+# Restart Nginx
+# ============================
+systemctl restart nginx || echo "⚠️ Nginx failed to start. Check config: sudo nginx -t"
 
-# ----------------------------
-# Internal IP detection
-# ----------------------------
+# ============================
+# Install Webmin
+# ============================
+wget -q -O- http://www.webmin.com/jcameron-key.asc | gpg --dearmor > /etc/apt/trusted.gpg.d/webmin.gpg
+echo "deb https://download.webmin.com/download/repository sarge contrib" > /etc/apt/sources.list.d/webmin.list
+apt-get update -y
+apt-get install -y webmin
+
+# Bind Webmin to internal IP only
 INTERNAL_IP=$(hostname -I | awk '{print $1}')
+sed -i "s/^\(listen=\).*/\1$INTERNAL_IP/" /etc/webmin/miniserv.conf || echo "listen=$INTERNAL_IP" >> /etc/webmin/miniserv.conf
+systemctl restart webmin
 
+# ============================
+# Install Netdata (via kickstart)
+# ============================
+bash <(curl -Ss https://my-netdata.io/kickstart.sh) --dont-wait
+
+# ============================
+# Setup Git Auto-Deploy
+# ============================
+GITREPO="killerhash-stack/ubuntu-webserver-setup"
+mkdir -p /var/www/html
+chown -R $DEPLOYUSER:$DEPLOYUSER /var/www/html
+
+cat > /home/$DEPLOYUSER/deploy.sh <<'EOL'
+#!/bin/bash
+cd /var/www/html
+unset GIT_DIR
+git pull origin main
+EOL
+
+chmod +x /home/$DEPLOYUSER/deploy.sh
+chown $DEPLOYUSER:$DEPLOYUSER /home/$DEPLOYUSER/deploy.sh
+
+# ============================
 # ----------------------------
 # Final Access Summary
 # ----------------------------
 echo ""
 echo "🌐 Access your server:"
 echo ""
+
 # Webmin
 if systemctl list-unit-files | grep -q "^webmin.service"; then
     echo " - Webmin: https://$INTERNAL_IP:10000"
@@ -178,6 +191,25 @@ fi
 echo ""
 echo "🛡️ ModSecurity WAF is active with OWASP CRS rules"
 echo "Check Nginx logs for blocked requests: sudo tail -f /var/log/nginx/modsec_audit.log"
+
+# SSL
+echo ""
+echo "🔐 Certbot SSL certificates:"
+certbot certificates || echo "  ⚠️ No certificates installed yet."
+
+# Firewall
+echo ""
+echo "🛡 Firewall status:"
+ufw status verbose
+
+# SSH key info
+echo ""
+echo "🔑 SSH Key for deploy user ($DEPLOYUSER): /home/$DEPLOYUSER/.ssh/authorized_keys"
+
+# Optional Nginx config test
+echo ""
+echo "📝 Optional: Test Nginx config before reload"
+echo "    sudo nginx -t"
 
 # SSL reminder
 echo ""
