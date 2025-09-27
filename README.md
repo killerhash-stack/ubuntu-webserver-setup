@@ -1,9 +1,6 @@
 ### Run the Setup Script
 
 ```bash
-# Remove old script if exists
-[ -f ~/setup-webserver.sh ] && rm ~/setup-webserver.sh
-
 # Download and run latest version
 curl -fsSL https://raw.githubusercontent.com/killerhash-stack/ubuntu-webserver-setup/main/setup-webserver.sh -o ~/setup-webserver.sh
 chmod +x ~/setup-webserver.sh
