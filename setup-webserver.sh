@@ -9,7 +9,7 @@ set -o pipefail
 
 # Script metadata
 SCRIPT_NAME="ultimate-webserver-setup"
-SCRIPT_VERSION="3.0"
+SCRIPT_VERSION="3.1"  # Updated for Quick Wins
 SCRIPT_URL="https://raw.githubusercontent.com/killerhash-stack/ubuntu-webserver-setup/main/setup-webserver.sh"
 
 # Logging setup
@@ -231,6 +231,239 @@ get_user_input() {
     log "Configuration gathered successfully"
 }
 
+# QUICK WIN 1: OPcache Configuration
+configure_opcache() {
+    local php_version=$1
+    log "Configuring OPcache for PHP $php_version..."
+    
+    local opcache_ini="/etc/php/$php_version/fpm/conf.d/10-opcache.ini"
+    
+    cat > "$opcache_ini" << EOF
+; OPcache Configuration for Maximum Performance
+opcache.enable=1
+opcache.memory_consumption=256
+opcache.interned_strings_buffer=32
+opcache.max_accelerated_files=20000
+opcache.max_wasted_percentage=10
+opcache.use_cwd=1
+opcache.validate_timestamps=1
+opcache.revalidate_freq=2
+opcache.save_comments=1
+opcache.enable_file_override=1
+opcache.optimization_level=0x7FFFBFFF
+opcache.file_cache=/var/www/opcache
+opcache.file_cache_only=0
+opcache.file_cache_consistency_checks=1
+opcache.huge_code_pages=1
+; For production, set to 0 and reset via cron
+opcache.validate_timestamps=1
+EOF
+
+    # Create opcache directory
+    mkdir -p /var/www/opcache
+    chown www-data:www-data /var/www/opcache
+    
+    systemctl restart "php${php_version}-fpm"
+    log "OPcache configured for PHP $php_version"
+}
+
+# QUICK WIN 2: Brotli Compression
+configure_brotli() {
+    log "Installing and configuring Brotli compression..."
+    
+    # Install Brotli module
+    if install_package "libnginx-mod-brotli"; then
+        # Add Brotli configuration to nginx.conf
+        if ! grep -q "brotli" /etc/nginx/nginx.conf; then
+            cat >> /etc/nginx/nginx.conf << 'EOF'
+
+    # Brotli Compression
+    brotli on;
+    brotli_comp_level 6;
+    brotli_types
+        text/plain
+        text/css
+        text/xml
+        text/javascript
+        application/json
+        application/javascript
+        application/xml+rss
+        application/atom+xml
+        image/svg+xml
+        font/woff2
+        font/woff
+        font/ttf;
+EOF
+        fi
+        log "Brotli compression installed and configured"
+    else
+        warn "Brotli installation failed, continuing with gzip only"
+    fi
+}
+
+# QUICK WIN 3: Database User Creation
+create_application_user() {
+    log "Creating secure application database users..."
+    
+    # Generate secure credentials
+    local db_user="app_$(openssl rand -hex 3)"
+    local db_password=$(openssl rand -base64 32)
+    local web_user="web_$(openssl rand -hex 3)"
+    local web_password=$(openssl rand -base64 32)
+    
+    # Create application user with full privileges
+    mysql -e "CREATE USER '${db_user}'@'localhost' IDENTIFIED BY '${db_password}';" 2>/dev/null || true
+    mysql -e "GRANT ALL PRIVILEGES ON *.* TO '${db_user}'@'localhost' WITH GRANT OPTION;" 2>/dev/null || true
+    
+    # Create web user with limited privileges (for WordPress, Laravel, etc.)
+    mysql -e "CREATE USER '${web_user}'@'localhost' IDENTIFIED BY '${web_password}';" 2>/dev/null || true
+    mysql -e "GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, DROP, INDEX, ALTER, CREATE TEMPORARY TABLES ON *.* TO '${web_user}'@'localhost';" 2>/dev/null || true
+    
+    mysql -e "FLUSH PRIVILEGES;"
+    
+    # Save credentials securely
+    cat > /root/.db_app_credentials << EOF
+# Application Database User (Full privileges)
+Username: $db_user
+Password: $db_password
+
+# Usage:
+# mysql -u $db_user -p
+EOF
+    chmod 600 /root/.db_app_credentials
+    
+    cat > /root/.db_web_credentials << EOF
+# Web Application Database User (Limited privileges)
+Username: $web_user
+Password: $web_password
+
+# Suitable for WordPress, Laravel, etc.
+# Permissions: SELECT, INSERT, UPDATE, DELETE, CREATE, DROP, INDEX, ALTER
+EOF
+    chmod 600 /root/.db_web_credentials
+    
+    log "Database users created: $db_user (full privileges) and $web_user (web app privileges)"
+}
+
+# QUICK WIN 4: Enhanced SSL/TLS Configuration
+configure_enhanced_ssl() {
+    log "Configuring enhanced SSL/TLS security..."
+    
+    local nginx_config="/etc/nginx/sites-available/$DOMAIN"
+    
+    # Update the server block with enhanced SSL settings
+    if grep -q "listen 443 ssl" "$nginx_config"; then
+        # Insert enhanced SSL configuration after SSL settings
+        sed -i '/ssl_certificate /a\
+    # Enhanced SSL Security\
+    ssl_protocols TLSv1.2 TLSv1.3;\
+    ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:DHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384;\
+    ssl_prefer_server_ciphers off;\
+    ssl_session_cache shared:SSL:10m;\
+    ssl_session_timeout 1d;\
+    ssl_session_tickets off;\
+    \
+    # Security Headers\
+    add_header Strict-Transport-Security "max-age=63072000; includeSubDomains; preload" always;\
+    add_header X-Content-Type-Options nosniff always;\
+    add_header X-Frame-Options "SAMEORIGIN" always;\
+    add_header X-XSS-Protection "1; mode=block" always;\
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;\
+    add_header Permissions-Policy "geolocation=(), microphone=(), camera=()" always;\
+    \
+    # Enable HTTP/2\
+    http2 on;' "$nginx_config"
+    fi
+    
+    # Test and reload
+    if nginx -t; then
+        systemctl reload nginx
+        log "Enhanced SSL/TLS configuration applied"
+    else
+        warn "SSL configuration test failed, using standard SSL"
+    fi
+}
+
+# QUICK WIN 5: Log Rotation Setup
+configure_log_rotation() {
+    log "Setting up comprehensive log rotation..."
+    
+    # Nginx log rotation
+    cat > /etc/logrotate.d/nginx << 'EOF'
+/var/log/nginx/*.log {
+    daily
+    missingok
+    rotate 52
+    compress
+    delaycompress
+    notifempty
+    create 0640 www-data adm
+    sharedscripts
+    prerotate
+        if [ -d /etc/logrotate.d/httpd-prerotate ]; then
+            run-parts /etc/logrotate.d/httpd-prerotate
+        fi
+    endscript
+    postrotate
+        invoke-rc.d nginx rotate >/dev/null 2>&1
+    endscript
+}
+EOF
+
+    # PHP-FPM log rotation
+    cat > /etc/logrotate.d/php${PHP_VERSION}-fpm << EOF
+/var/log/php${PHP_VERSION}-fpm.log {
+    daily
+    missingok
+    rotate 52
+    compress
+    delaycompress
+    notifempty
+    create 640 www-data www-data
+    postrotate
+        /bin/kill -SIGUSR1 \$(cat /var/run/php/php${PHP_VERSION}-fpm.pid 2>/dev/null) 2>/dev/null || true
+    endscript
+}
+EOF
+
+    # MySQL log rotation
+    cat > /etc/logrotate.d/mysql << 'EOF'
+/var/log/mysql/*.log {
+    daily
+    missingok
+    rotate 7
+    compress
+    delaycompress
+    notifempty
+    create 640 mysql adm
+    postrotate
+        test -x /usr/bin/mysqladmin || exit 0
+        MYADMIN="/usr/bin/mysqladmin --defaults-file=/etc/mysql/debian.cnf"
+        if [ -z "$(ls -A /var/lib/mysql)" ]; then exit 0; fi
+        debian-systemd-invoke --quiet restart mysql || exit 1
+    endscript
+}
+EOF
+
+    # Application log rotation
+    cat > /etc/logrotate.d/webserver << 'EOF'
+/var/www/html/*/logs/*.log /var/www/*/logs/*.log {
+    daily
+    missingok
+    rotate 30
+    compress
+    delaycompress
+    notifempty
+    create 644 www-data www-data
+    postrotate
+        systemctl reload nginx >/dev/null 2>&1 || true
+    endscript
+}
+EOF
+
+    log "Log rotation configured for all services (Nginx, PHP-FPM, MySQL, Applications)"
+}
+
 # Installation functions
 install_essentials() {
     log "Installing essential packages..."
@@ -308,6 +541,9 @@ install_php() {
     systemctl start "php$PHP_VERSION-fpm"
     systemctl enable "php$PHP_VERSION-fpm"
     
+    # QUICK WIN 1: Configure OPcache
+    configure_opcache "$PHP_VERSION"
+    
     log "PHP $PHP_VERSION installed successfully"
 }
 
@@ -345,6 +581,9 @@ password=$MYSQL_ROOT_PASSWORD
 EOF
     chmod 600 /root/.my.cnf
     
+    # QUICK WIN 3: Create application database users
+    create_application_user
+    
     log "MySQL installed and secured successfully"
 }
 
@@ -380,6 +619,9 @@ user=root
 password=$MYSQL_ROOT_PASSWORD
 EOF
     chmod 600 /root/.my.cnf
+    
+    # QUICK WIN 3: Create application database users
+    create_application_user
     
     log "MariaDB installed and secured successfully"
 }
@@ -496,6 +738,9 @@ install_ssl() {
         error "Failed to obtain SSL certificate"
     fi
     
+    # QUICK WIN 4: Enhanced SSL Configuration
+    configure_enhanced_ssl
+    
     # Set up auto-renewal
     (crontab -l 2>/dev/null; echo "0 12 * * * /usr/bin/certbot renew --quiet") | crontab -
     
@@ -566,6 +811,9 @@ optimize_nginx() {
         sed -i "/events {/a\    worker_connections $worker_connections;\n    multi_accept on;\n    use epoll;" /etc/nginx/nginx.conf
     fi
     
+    # QUICK WIN 2: Configure Brotli Compression
+    configure_brotli
+    
     # Add HTTP performance optimizations
     if grep -q "http {" /etc/nginx/nginx.conf && ! grep -q "client_body_buffer_size" /etc/nginx/nginx.conf; then
         cat >> /etc/nginx/nginx.conf << 'EOF'
@@ -582,7 +830,7 @@ optimize_nginx() {
     keepalive_timeout 15;
     send_timeout 10;
     
-    # Gzip compression
+    # Gzip compression (fallback if Brotli fails)
     gzip on;
     gzip_vary on;
     gzip_min_length 1024;
@@ -880,6 +1128,12 @@ EOF
     log "Web content created successfully"
 }
 
+# QUICK WIN 5: Add log rotation to main execution
+configure_system_logging() {
+    log "Configuring system-wide logging..."
+    configure_log_rotation
+}
+
 # Beautiful completion message
 show_completion() {
     local ip_address=$(hostname -I | awk '{print $1}')
@@ -998,6 +1252,9 @@ main() {
         fi
         log "Performance optimizations completed"
     fi
+    
+    # QUICK WIN 5: Configure log rotation
+    configure_system_logging
     
     # Security configuration
     if [ "$INSTALL_SECURITY" = true ]; then
