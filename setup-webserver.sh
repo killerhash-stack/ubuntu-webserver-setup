@@ -108,8 +108,7 @@ install_package() {
     log "Installing package: $package"
     
     if ! dpkg -l | grep -q "^ii  $package "; then
-        apt-get install -y "$package" > /dev/null 2>&1
-        if [ $? -eq 0 ]; then
+        if apt-get install -y "$package" > /dev/null 2>&1; then
             log "Successfully installed: $package"
         else
             warn "Failed to install: $package"
@@ -407,16 +406,15 @@ install_essentials() {
 install_nginx() {
     log "Installing Nginx..."
     
-    # Add Nginx official repository
-    curl -fsSL https://nginx.org/keys/nginx_signing.key | gpg --dearmor -o /usr/share/keyrings/nginx-archive-keyring.gpg
-    echo "deb [signed-by=/usr/share/keyrings/nginx-archive-keyring.gpg] http://nginx.org/packages/ubuntu $(lsb_release -cs) nginx" > /etc/apt/sources.list.d/nginx.list
-    
-    update_package_list
+    # Use Ubuntu's default Nginx (more stable than external repos)
     install_package "nginx"
     
     # Start and enable Nginx
     systemctl enable nginx
     systemctl start nginx
+    
+    # Create web root if it doesn't exist
+    mkdir -p /var/www/html
     
     success "Nginx installed and started"
 }
@@ -451,18 +449,23 @@ install_redis() {
 }
 
 # ============================================================================
-# CONFIGURATION FUNCTIONS
+# FIXED NGINX CONFIGURATION
 # ============================================================================
 
 configure_nginx() {
     log "Configuring Nginx..."
     
-    # Create main website configuration
-    cat > /etc/nginx/sites-available/default <<EOF
+    # Create main website configuration - FIXED PATH
+    local nginx_site_config="/etc/nginx/sites-available/default"
+    
+    # Check if default file exists, if not create it
+    if [ ! -f "$nginx_site_config" ]; then
+        log "Creating default Nginx site configuration..."
+        cat > "$nginx_site_config" <<EOF
 server {
-    listen 80;
-    listen [::]:80;
-    server_name $DOMAIN www.$DOMAIN;
+    listen 80 default_server;
+    listen [::]:80 default_server;
+    server_name _;
     root /var/www/html;
     index index.php index.html index.htm;
 
@@ -495,10 +498,81 @@ server {
     }
 }
 EOF
+    else
+        # Update existing configuration
+        log "Updating existing Nginx configuration..."
+        cp "$nginx_site_config" "$nginx_site_config.backup.$(date +%Y%m%d)"
+        
+        # Update server_name and root if they exist, otherwise append
+        if grep -q "server_name" "$nginx_site_config"; then
+            sed -i "s/server_name.*/server_name $DOMAIN www.$DOMAIN;/" "$nginx_site_config"
+        else
+            sed -i "/listen.*default_server;/a\\    server_name $DOMAIN www.$DOMAIN;" "$nginx_site_config"
+        fi
+        
+        # Ensure PHP handling is configured
+        if ! grep -q "location ~ \\\.php\$" "$nginx_site_config"; then
+            cat >> "$nginx_site_config" <<'EOF'
+
+    # PHP handling
+    location ~ \.php$ {
+        include snippets/fastcgi-php.conf;
+        fastcgi_pass unix:/var/run/php/php8.3-fpm.sock;
+        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+        include fastcgi_params;
+    }
+EOF
+        fi
+    fi
+
+    # Create domain-specific configuration as well
+    local domain_config="/etc/nginx/sites-available/$DOMAIN"
+    if [ ! -f "$domain_config" ]; then
+        cat > "$domain_config" <<EOF
+server {
+    listen 80;
+    listen [::]:80;
+    server_name $DOMAIN www.$DOMAIN;
+    root /var/www/html;
+    index index.php index.html index.htm;
+
+    # Security headers
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header X-XSS-Protection "1; mode=block" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header Referrer-Policy "no-referrer-when-downgrade" always;
+
+    # PHP handling
+    location ~ \.php$ {
+        include snippets/fastcgi-php.conf;
+        fastcgi_pass unix:/var/run/php/php$PHP_VERSION-fpm.sock;
+        fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
+        include fastcgi_params;
+    }
+
+    location ~ /\. {
+        deny all;
+        access_log off;
+        log_not_found off;
+    }
+
+    location ~* \.(jpg|jpeg|png|gif|ico|css|js|woff|woff2|ttf|eot|svg)$ {
+        expires 1y;
+        add_header Cache-Control "public, immutable";
+    }
+}
+EOF
+        # Enable the domain site
+        ln -sf "$domain_config" "/etc/nginx/sites-enabled/$DOMAIN"
+    fi
 
     # Test and reload Nginx
-    nginx -t && systemctl reload nginx
-    success "Nginx configured for domain: $DOMAIN"
+    if nginx -t; then
+        systemctl reload nginx
+        success "Nginx configured for domain: $DOMAIN"
+    else
+        error "Nginx configuration test failed"
+    fi
 }
 
 install_ssl() {
@@ -576,7 +650,6 @@ optimize_nginx() {
 user www-data;
 worker_processes auto;
 pid /run/nginx.pid;
-include /etc/nginx/modules-enabled/*.conf;
 
 events {
     worker_connections 4096;
@@ -739,7 +812,7 @@ configure_security_auditing() {
     done
     
     # Initialize AIDE (file integrity checker)
-    aideinit
+    aideinit --yes
     
     # Create daily security scan script
     cat > /usr/local/bin/daily-security-scan.sh <<'EOF'
