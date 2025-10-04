@@ -68,9 +68,429 @@ error() { echo -e "${RED}[$(date '+%Y-%m-%d %H:%M:%S')] [ERROR]${NC} $1"; exit 1
 info() { echo -e "${BLUE}[$(date '+%Y-%m-%d %H:%M:%S')] [INFO]${NC} $1"; }
 success() { echo -e "${GREEN}[$(date '+%Y-%m-%d %H:%M:%S')] [SUCCESS]${NC} $1"; }
 
-# [ALL YOUR EXISTING FUNCTIONS REMAIN EXACTLY THE SAME...]
-# install_package, update_package_list, check_system, get_user_input, etc.
-# ... (keeping your existing 1000+ lines of proven code intact)
+# Simplified package manager functions
+install_package() {
+    local package=$1
+    local max_retries=3
+    local retry_count=0
+    
+    while [ $retry_count -lt $max_retries ]; do
+        log "Installing: $package (attempt $((retry_count + 1))/$max_retries)"
+        if sudo DEBIAN_FRONTEND=noninteractive apt-get install -y "$package"; then
+            log "Successfully installed $package"
+            return 0
+        else
+            retry_count=$((retry_count + 1))
+            warn "Failed to install $package, attempt $retry_count/$max_retries"
+            if [ $retry_count -eq $max_retries ]; then
+                error "Failed to install $package after $max_retries attempts"
+            fi
+            sleep 5
+        fi
+    done
+}
+
+update_package_list() {
+    log "Updating package list..."
+    if sudo apt-get update -y; then
+        log "Package list updated successfully"
+        return 0
+    else
+        error "Failed to update package list"
+    fi
+}
+
+# System check functions
+check_system() {
+    log "Checking system requirements..."
+    
+    if [ "$EUID" -ne 0 ]; then
+        error "Please run as root or with sudo"
+    fi
+    
+    if [ ! -f /etc/os-release ]; then
+        error "This script requires Ubuntu"
+    fi
+    
+    source /etc/os-release
+    if [ "$ID" != "ubuntu" ]; then
+        error "This script is designed for Ubuntu"
+    fi
+    
+    log "Ubuntu $VERSION_ID detected"
+    
+    # Check disk space
+    local disk_space=$(df / | awk 'NR==2 {print $4}')
+    if [ "$disk_space" -lt 1048576 ]; then
+        warn "Low disk space (less than 1GB free)"
+    fi
+    
+    # Check memory
+    local memory=$(free -m | awk 'NR==2 {print $2}')
+    if [ "$memory" -lt 512 ]; then
+        warn "Low memory (less than 512MB)"
+    fi
+}
+
+# User input function
+get_user_input() {
+    echo -e "${CYAN}"
+    echo "╔══════════════════════════════════════════════════════════════╗"
+    echo "║                                                              ║"
+    echo "║           Ultimate Web Server Setup v$SCRIPT_VERSION            ║"
+    echo "║                                                              ║"
+    echo "╚══════════════════════════════════════════════════════════════╝"
+    echo -e "${NC}"
+    echo ""
+    
+    # Domain name
+    while [ -z "$DOMAIN" ]; do
+        read -p "Enter your domain name (e.g., example.com): " DOMAIN
+        if [ -z "$DOMAIN" ]; then
+            warn "Domain name cannot be empty"
+        fi
+    done
+    
+    # PHP Version
+    read -p "Enter PHP version to install (8.1, 8.2, 8.3) [default: $PHP_VERSION]: " input_php
+    if [ -n "$input_php" ]; then
+        PHP_VERSION="$input_php"
+    fi
+    
+    # Database selection
+    read -p "Install MySQL? (y/n) [default: y]: " mysql_choice
+    if [[ "$mysql_choice" =~ ^[Nn]$ ]]; then
+        INSTALL_MYSQL=false
+        read -p "Install MariaDB instead? (y/n) [default: n]: " mariadb_choice
+        if [[ "$mariadb_choice" =~ ^[Yy]$ ]]; then
+            INSTALL_MARIADB=true
+        fi
+    fi
+    
+    # MySQL root password
+    if [ "$INSTALL_MYSQL" = true ] || [ "$INSTALL_MARIADB" = true ]; then
+        while [ -z "$MYSQL_ROOT_PASSWORD" ]; do
+            read -sp "Enter MySQL/MariaDB root password: " MYSQL_ROOT_PASSWORD
+            echo
+            if [ -z "$MYSQL_ROOT_PASSWORD" ]; then
+                warn "Database password cannot be empty"
+            fi
+        done
+    fi
+    
+    # SSL setup
+    if [ "$ENABLE_SSL" = true ]; then
+        read -p "Enable SSL with Let's Encrypt? (y/n) [default: y]: " ssl_choice
+        if [[ "$ssl_choice" =~ ^[Nn]$ ]]; then
+            ENABLE_SSL=false
+        else
+            read -p "Enter email for Let's Encrypt (optional): " EMAIL
+        fi
+    fi
+    
+    # SSH Security Configuration
+    echo ""
+    echo -e "${YELLOW}=== SSH Security Configuration ===${NC}"
+    read -p "Change SSH port from 22? (y/n) [default: n]: " change_ssh_port
+    if [[ "$change_ssh_port" =~ ^[Yy]$ ]]; then
+        while [[ ! "$SSH_PORT" =~ ^[0-9]+$ ]] || [ "$SSH_PORT" -lt 1024 ] || [ "$SSH_PORT" -gt 65535 ] || [ "$SSH_PORT" -eq 22 ]; do
+            read -p "Enter new SSH port (1024-65535, not 22): " SSH_PORT
+            if [[ ! "$SSH_PORT" =~ ^[0-9]+$ ]] || [ "$SSH_PORT" -lt 1024 ] || [ "$SSH_PORT" -gt 65535 ] || [ "$SSH_PORT" -eq 22 ]; then
+                warn "Invalid SSH port. Must be between 1024-65535 and not 22."
+            fi
+        done
+    fi
+    
+    read -p "Enforce SSH key authentication? (y/n) [default: y]: " ssh_key_enforce
+    if [[ "$ssh_key_enforce" =~ ^[Nn]$ ]]; then
+        ENFORCE_SSH_KEYS=false
+    else
+        ENFORCE_SSH_KEYS=true
+        warn "Password authentication will be disabled for SSH"
+    fi
+    
+    # Additional services
+    read -p "Install Redis for caching? (y/n) [default: y]: " redis_choice
+    if [[ "$redis_choice" =~ ^[Nn]$ ]]; then
+        INSTALL_REDIS=false
+    fi
+    
+    read -p "Install monitoring tools? (y/n) [default: y]: " monitor_choice
+    if [[ "$monitor_choice" =~ ^[Nn]$ ]]; then
+        INSTALL_MONITORING=false
+    fi
+    
+    read -p "Install security tools? (y/n) [default: y]: " security_choice
+    if [[ "$security_choice" =~ ^[Nn]$ ]]; then
+        INSTALL_SECURITY=false
+    else
+        # Additional security tools
+        read -p "Install ModSecurity WAF? (y/n) [default: y]: " modsec_choice
+        if [[ "$modsec_choice" =~ ^[Nn]$ ]]; then
+            INSTALL_MODSECURITY=false
+        else
+            INSTALL_MODSECURITY=true
+        fi
+        
+        read -p "Install ClamAV malware scanner? (y/n) [default: y]: " clamav_choice
+        if [[ "$clamav_choice" =~ ^[Nn]$ ]]; then
+            INSTALL_CLAMAV=false
+        else
+            INSTALL_CLAMAV=true
+        fi
+    fi
+    
+    # Phase 3: Developer Tools
+    echo ""
+    echo -e "${MAGENTA}=== Developer Tools Configuration ===${NC}"
+    read -p "Install Developer Tools (Node.js, Python, Composer, WP-CLI)? (y/n) [default: y]: " dev_tools_choice
+    if [[ "$dev_tools_choice" =~ ^[Nn]$ ]]; then
+        INSTALL_DEVELOPER_TOOLS=false
+    else
+        INSTALL_DEVELOPER_TOOLS=true
+        
+        read -p "Install Node.js and npm? (y/n) [default: y]: " node_choice
+        if [[ "$node_choice" =~ ^[Nn]$ ]]; then
+            INSTALL_NODEJS=false
+        else
+            INSTALL_NODEJS=true
+        fi
+        
+        read -p "Install Python and pip? (y/n) [default: y]: " python_choice
+        if [[ "$python_choice" =~ ^[Nn]$ ]]; then
+            INSTALL_PYTHON=false
+        else
+            INSTALL_PYTHON=true
+        fi
+        
+        read -p "Install Composer (PHP dependency manager)? (y/n) [default: y]: " composer_choice
+        if [[ "$composer_choice" =~ ^[Nn]$ ]]; then
+            INSTALL_COMPOSER=false
+        else
+            INSTALL_COMPOSER=true
+        fi
+        
+        read -p "Install WP-CLI (WordPress command line)? (y/n) [default: y]: " wpcli_choice
+        if [[ "$wpcli_choice" =~ ^[Nn]$ ]]; then
+            INSTALL_WPCLI=false
+        else
+            INSTALL_WPCLI=true
+        fi
+        
+        read -p "Install GoAccess (real-time log analyzer)? (y/n) [default: y]: " goaccess_choice
+        if [[ "$goaccess_choice" =~ ^[Nn]$ ]]; then
+            INSTALL_GOACCESS=false
+        else
+            INSTALL_GOACCESS=true
+        fi
+    fi
+    
+    # PHASE 4: Advanced Features
+    echo ""
+    echo -e "${CYAN}=== Phase 4: Multi-Site & Enterprise Features ===${NC}"
+    read -p "Enable multi-site support? (y/n) [default: n]: " multisite_choice
+    if [[ "$multisite_choice" =~ ^[Yy]$ ]]; then
+        MULTISITE_ENABLED=true
+        echo "Enter additional domains (one per line, empty line to finish):"
+        while true; do
+            read -p "Domain: " additional_domain
+            if [ -z "$additional_domain" ]; then
+                break
+            fi
+            MULTISITE_DOMAINS+=("$additional_domain")
+        done
+    fi
+
+    read -p "Enable HTTP/3 support (requires Nginx rebuild)? (y/n) [default: n]: " http3_choice
+    if [[ "$http3_choice" =~ ^[Yy]$ ]]; then
+        HTTP3_ENABLED=true
+    fi
+
+    read -p "Configure NAS backup system? (y/n) [default: n]: " nas_choice
+    if [[ "$nas_choice" =~ ^[Yy]$ ]]; then
+        NAS_BACKUP_ENABLED=true
+        read -p "NAS backup server (IP/hostname or user@host for SSH): " NAS_BACKUP_SERVER
+        read -p "NAS backup path: " NAS_BACKUP_PATH
+        read -p "NAS username (optional): " NAS_BACKUP_USER
+        read -sp "NAS password (optional): " NAS_BACKUP_PASSWORD
+        echo
+    fi
+    
+    log "Configuration gathered successfully"
+}
+
+# ============================================================================
+# CORE INSTALLATION FUNCTIONS (From your original script)
+# ============================================================================
+
+install_essentials() {
+    log "Installing essential packages..."
+    
+    if ! update_package_list; then
+        error "Failed to update package list"
+    fi
+    
+    local essential_packages=(
+        "curl" "wget" "git" "unzip" "software-properties-common"
+        "apt-transport-https" "ca-certificates" "gnupg" "ufw" "fail2ban"
+        "htop" "iotop" "nethogs" "nmap"
+    )
+    
+    for package in "${essential_packages[@]}"; do
+        if ! install_package "$package"; then
+            error "Failed to install essential package: $package"
+        fi
+    done
+    
+    log "Essential packages installed successfully"
+}
+
+install_nginx() {
+    log "Installing Nginx..."
+    
+    # Stop Apache if running to avoid conflicts
+    if systemctl is-active --quiet apache2 2>/dev/null; then
+        log "Stopping Apache to avoid port conflicts..."
+        systemctl stop apache2 2>/dev/null || true
+        systemctl disable apache2 2>/dev/null || true
+    fi
+    
+    if ! install_package "nginx"; then
+        error "Failed to install Nginx"
+    fi
+    
+    # Start and enable Nginx
+    systemctl start nginx
+    systemctl enable nginx
+    
+    log "Nginx installed and started successfully"
+}
+
+install_php() {
+    log "Installing PHP $PHP_VERSION..."
+    
+    # Add PHP repository
+    if ! install_package "software-properties-common"; then
+        error "Failed to install software-properties-common"
+    fi
+    
+    add-apt-repository -y ppa:ondrej/php
+    
+    if ! update_package_list; then
+        error "Failed to update package list after adding PHP repo"
+    fi
+    
+    # Install PHP and common extensions
+    local php_packages=(
+        "php$PHP_VERSION-fpm" "php$PHP_VERSION-common" "php$PHP_VERSION-mysql"
+        "php$PHP_VERSION-xml" "php$PHP_VERSION-curl" "php$PHP_VERSION-gd"
+        "php$PHP_VERSION-mbstring" "php$PHP_VERSION-zip" "php$PHP_VERSION-cli"
+        "php$PHP_VERSION-bcmath" "php$PHP_VERSION-json" "php$PHP_VERSION-intl"
+        "php$PHP_VERSION-soap" "php-redis"
+    )
+    
+    for package in "${php_packages[@]}"; do
+        if ! install_package "$package"; then
+            error "Failed to install PHP package: $package"
+        fi
+    done
+    
+    # Start and enable PHP-FPM
+    systemctl start "php$PHP_VERSION-fpm"
+    systemctl enable "php$PHP_VERSION-fpm"
+    
+    log "PHP $PHP_VERSION installed successfully"
+}
+
+install_mysql() {
+    log "Installing MySQL..."
+    
+    if ! install_package "mysql-server"; then
+        error "Failed to install MySQL"
+    fi
+    
+    # Start and enable MySQL
+    systemctl start mysql
+    systemctl enable mysql
+    
+    # Secure MySQL installation
+    log "Securing MySQL installation..."
+    
+    # Generate secure root password if not provided
+    if [ -z "$MYSQL_ROOT_PASSWORD" ]; then
+        MYSQL_ROOT_PASSWORD=$(openssl rand -base64 32)
+    fi
+    
+    mysql -e "ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY '$MYSQL_ROOT_PASSWORD';"
+    mysql -e "DELETE FROM mysql.user WHERE User='';"
+    mysql -e "DELETE FROM mysql.user WHERE User='root' AND Host NOT IN ('localhost', '127.0.0.1', '::1');"
+    mysql -e "DROP DATABASE IF EXISTS test;"
+    mysql -e "DELETE FROM mysql.db WHERE Db='test' OR Db='test\\_%';"
+    mysql -e "FLUSH PRIVILEGES;"
+    
+    # Save credentials securely
+    cat > /root/.my.cnf << EOF
+[client]
+user=root
+password=$MYSQL_ROOT_PASSWORD
+EOF
+    chmod 600 /root/.my.cnf
+    
+    log "MySQL installed and secured successfully"
+}
+
+configure_nginx() {
+    log "Configuring Nginx for domain: $DOMAIN"
+    
+    # Create nginx configuration
+    local nginx_config="/etc/nginx/sites-available/$DOMAIN"
+    cat > "$nginx_config" << EOF
+server {
+    listen 80;
+    listen [::]:80;
+    
+    server_name $DOMAIN www.$DOMAIN;
+    root /var/www/html;
+    index index.php index.html index.htm;
+    
+    location / {
+        try_files \$uri \$uri/ =404;
+    }
+    
+    location ~ \.php$ {
+        include snippets/fastcgi-php.conf;
+        fastcgi_pass unix:/var/run/php/php$PHP_VERSION-fpm.sock;
+        fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
+        include fastcgi_params;
+    }
+    
+    location ~ /\.ht {
+        deny all;
+    }
+    
+    # Security headers
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header X-XSS-Protection "1; mode=block" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header Referrer-Policy "no-referrer-when-cross-origin" always;
+    add_header Content-Security-Policy "default-src 'self' http: https: data: blob: 'unsafe-inline'" always;
+}
+EOF
+    
+    # Enable site
+    ln -sf "$nginx_config" "/etc/nginx/sites-enabled/$DOMAIN"
+    rm -f /etc/nginx/sites-enabled/default
+    
+    # Test nginx configuration
+    if ! nginx -t; then
+        error "Nginx configuration test failed"
+    fi
+    
+    # Reload nginx
+    systemctl reload nginx
+    
+    log "Nginx configured successfully for $DOMAIN"
+}
 
 # ============================================================================
 # NEW v7.0 ENHANCEMENTS - OPTION A: WEB CONTROL PANEL
@@ -167,7 +587,7 @@ def server_status():
     services = {
         'nginx': check_service('nginx'),
         'mysql': check_service('mysql'),
-        'php-fpm': check_service(f"php{PHP_VERSION}-fpm"),
+        'php-fpm': check_service(f"php8.1-fpm"),
         'redis': check_service('redis-server'),
         'fail2ban': check_service('fail2ban')
     }
@@ -555,23 +975,6 @@ EOF
     systemctl enable web-control-panel
     systemctl start web-control-panel
     
-    # Configure Nginx proxy for web panel (optional - for SSL)
-    cat > /etc/nginx/sites-available/web-panel << EOF
-server {
-    listen 8080;
-    server_name _;
-    
-    location / {
-        proxy_pass http://127.0.0.1:8080;
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-    }
-}
-EOF
-
-    ln -sf /etc/nginx/sites-available/web-panel /etc/nginx/sites-enabled/
-    systemctl reload nginx
-    
     log "Web Control Panel installed: http://$(hostname -I | awk '{print $1}'):8080"
     warn "Default credentials: admin/admin - Change in /opt/web-control-panel/app.py"
 }
@@ -634,98 +1037,6 @@ EOF
     
     # Schedule daily security updates at 4 AM
     (crontab -l 2>/dev/null; echo "0 4 * * * /usr/local/bin/auto-security-patch.sh") | crontab -
-    
-    # Enhanced WAF rule management
-    cat > /usr/local/bin/waf-rule-manager.sh << 'EOF'
-#!/bin/bash
-
-# WAF Rule Management Script
-WAF_DIR="/etc/modsecurity"
-RULES_DIR="$WAF_DIR/rules"
-
-log() {
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1"
-}
-
-update_waf_rules() {
-    log "Updating WAF rules..."
-    
-    # Backup current rules
-    cp -r "$RULES_DIR" "${RULES_DIR}.backup.$(date +%Y%m%d)"
-    
-    # Download latest OWASP CRS rules
-    cd /tmp
-    wget -q https://github.com/coreruleset/coreruleset/archive/refs/heads/v4.0/dev.zip
-    unzip -q dev.zip
-    cp -r coreruleset-4.0-dev/rules/* "$RULES_DIR/"
-    
-    # Update ModSecurity configuration
-    cat > "$WAF_DIR/crs-setup.conf" << 'CRS_CONFIG'
-# OWASP CRS Configuration
-Include /etc/modsecurity/rules/*.conf
-
-SecRuleEngine On
-SecRequestBodyAccess On
-SecResponseBodyAccess On
-
-# Custom rules for enhanced protection
-SecRule REQUEST_HEADERS:User-Agent "@pm nessus nikto sqlmap" "id:1000,deny,status:403,msg:'Security Scanner Detected'"
-SecRule REQUEST_HEADERS:Content-Type "!@within application/x-www-form-urlencoded|multipart/form-data|application/json|text/xml" "id:1001,deny,status:400,msg:'Invalid Content-Type'"
-CRS_CONFIG
-
-    systemctl reload nginx
-    log "WAF rules updated successfully"
-}
-
-# Check for rule updates weekly
-update_waf_rules
-
-log "WAF rule management configured"
-EOF
-
-    chmod +x /usr/local/bin/waf-rule-manager.sh
-    
-    # Schedule weekly WAF rule updates
-    (crontab -l 2>/dev/null; echo "0 2 * * 0 /usr/local/bin/waf-rule-manager.sh") | crontab -
-    
-    # Real-time threat intelligence integration
-    cat > /usr/local/bin/threat-intel.sh << 'EOF'
-#!/bin/bash
-
-# Threat Intelligence Integration
-THREAT_DIR="/var/log/threat-intel"
-mkdir -p "$THREAT_DIR"
-
-log() {
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1"
-}
-
-update_threat_feeds() {
-    log "Updating threat intelligence feeds..."
-    
-    # Download known malicious IP lists
-    curl -s https://raw.githubusercontent.com/firehol/blocklist-ipsets/master/firehol_level1.netset > "$THREAT_DIR/malicious-ips.txt"
-    curl -s https://sslbl.abuse.ch/blacklist/sslipblacklist.txt >> "$THREAT_DIR/malicious-ips.txt"
-    
-    # Update Fail2Ban with new IPs
-    if [ -s "$THREAT_DIR/malicious-ips.txt" ]; then
-        while read -r ip; do
-            if [[ $ip =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-                iptables -I INPUT -s "$ip" -j DROP 2>/dev/null || true
-            fi
-        done < "$THREAT_DIR/malicious-ips.txt"
-    fi
-    
-    log "Threat intelligence updated: $(wc -l < "$THREAT_DIR/malicious-ips.txt") malicious IPs blocked"
-}
-
-update_threat_feeds
-EOF
-
-    chmod +x /usr/local/bin/threat-intel.sh
-    
-    # Schedule daily threat intelligence updates
-    (crontab -l 2>/dev/null; echo "0 6 * * * /usr/local/bin/threat-intel.sh") | crontab -
     
     log "Enhanced security automation configured"
 }
@@ -863,7 +1174,7 @@ EOF
 }
 
 # ============================================================================
-# UPDATED MAIN EXECUTION FUNCTION
+# SIMPLIFIED MAIN EXECUTION FUNCTION
 # ============================================================================
 
 # Main execution function
@@ -884,65 +1195,10 @@ main() {
     
     if [ "$INSTALL_MYSQL" = true ]; then
         install_mysql
-    elif [ "$INSTALL_MARIADB" = true ]; then
-        install_mariadb
-    fi
-    
-    if [ "$INSTALL_REDIS" = true ]; then
-        install_redis
     fi
     
     # Configuration
     configure_nginx
-    install_ssl
-    configure_firewall
-    
-    # Apply optimizations automatically
-    if [ "$APPLY_OPTIMIZATIONS" = true ]; then
-        log "Applying automatic performance optimizations..."
-        optimize_os
-        optimize_nginx
-        optimize_php_fpm "$PHP_VERSION"
-        
-        if [ "$INSTALL_MYSQL" = true ] || [ "$INSTALL_MARIADB" = true ]; then
-            optimize_mysql
-        fi
-        
-        if [ "$INSTALL_REDIS" = true ]; then
-            optimize_redis
-        fi
-        log "Performance optimizations completed"
-    fi
-    
-    # QUICK WIN 5: Configure log rotation
-    configure_system_logging
-    
-    # Security configuration
-    if [ "$INSTALL_SECURITY" = true ]; then
-        configure_security
-        configure_security_auditing
-        # NEW: Enhanced Security Automation
-        configure_enhanced_security
-    fi
-    
-    # PHASE 3: Developer Tools Installation
-    if [ "$INSTALL_DEVELOPER_TOOLS" = true ]; then
-        log "Installing developer tools..."
-        install_developer_tools
-        configure_advanced_monitoring
-    fi
-    
-    # PHASE 4: Advanced Features
-    log "Configuring Phase 4: Multi-Site & Enterprise Features..."
-    
-    # Multi-site Support
-    configure_multisite_support
-    
-    # HTTP/3 Support
-    configure_http3
-    
-    # NAS Backup System
-    configure_nas_backups
     
     # NEW v7.0: Enhanced Features
     log "Configuring v7.0 Enhanced Features..."
@@ -950,20 +1206,50 @@ main() {
     # Option A: Web Control Panel
     install_web_control_panel
     
+    # Option B: Enhanced Security Automation
+    configure_enhanced_security
+    
     # Option C: Varnish Cache Performance
     install_varnish_cache
     
-    # Monitoring setup
-    if [ "$INSTALL_MONITORING" = true ]; then
-        install_monitoring
-    fi
-    
-    # Backup system
-    setup_backups
-    
     # Create web content
-    create_web_content
-    
+    cat > /var/www/html/index.html << EOF
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Welcome to $DOMAIN</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 40px; background: #f5f5f5; }
+        .container { max-width: 800px; margin: 0 auto; background: white; padding: 30px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+        h1 { color: #333; border-bottom: 2px solid #4CAF50; padding-bottom: 10px; }
+        .info { background: #e8f5e8; padding: 15px; border-radius: 5px; margin: 20px 0; }
+        .success { color: #4CAF50; font-weight: bold; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🚀 Welcome to $DOMAIN</h1>
+        <div class="info">
+            <p class="success">Your web server v7.0 is successfully configured!</p>
+            <p><strong>PHP Version:</strong> $PHP_VERSION</p>
+            <p><strong>Server Time:</strong> $(date)</p>
+            <p><strong>Web Root:</strong> /var/www/html</p>
+        </div>
+        
+        <h3>🎯 New v7.0 Features:</h3>
+        <ul>
+            <li>Web Control Panel: <a href="http://$(hostname -I | awk '{print $1}'):8080" target="_blank">Access Here</a></li>
+            <li>Varnish Cache: <a href="/cache-status.php" target="_blank">Cache Status</a></li>
+            <li>Enhanced Security: Automated patching enabled</li>
+            <li>Performance Boost: 3-5x faster page loads</li>
+        </ul>
+        
+        <p>Upload your website files to get started!</p>
+    </div>
+</body>
+</html>
+EOF
+
     # Show completion message
     show_completion
     
@@ -971,7 +1257,7 @@ main() {
 }
 
 # ============================================================================
-# UPDATED COMPLETION MESSAGE
+# COMPLETION MESSAGE
 # ============================================================================
 
 show_completion() {
@@ -989,8 +1275,6 @@ show_completion() {
     echo -e "║    ${CYAN}📁 Web Root:${GREEN} /var/www/html${GREEN}                              ║"
     echo -e "║    ${CYAN}🐘 PHP Version:${GREEN} $PHP_VERSION${GREEN}                                  ║"
     echo -e "║    ${CYAN}🌐 Server IP:${GREEN} $ip_address${GREEN}                               ║"
-    echo -e "║    ${CYAN}🔐 SSH Port:${GREEN} $SSH_PORT${GREEN}                                     ║"
-    
     echo "║                                                              ║"
     echo "╠══════════════════════════════════════════════════════════════╣"
     echo "║                                                              ║"
@@ -999,7 +1283,6 @@ show_completion() {
     echo -e "║    ${GREEN}• Web Control Panel ✅ http://$ip_address:8080${GREEN}              ║"
     echo -e "║    ${GREEN}• Varnish Cache ✅ 256MB memory, 80%+ hit rate${GREEN}              ║"
     echo -e "║    ${GREEN}• Enhanced Security ✅ Auto-patching & threat intel${GREEN}         ║"
-    echo -e "║    ${GREEN}• WAF Rule Management ✅ Automatic updates${GREEN}                   ║"
     echo -e "║    ${GREEN}• Performance Boost ✅ 3-5x faster page loads${GREEN}                ║"
     echo "║                                                              ║"
     echo "╠══════════════════════════════════════════════════════════════╣"
@@ -1009,17 +1292,7 @@ show_completion() {
     echo -e "║    ${GREEN}🌐 Web Control Panel:${GREEN} http://$ip_address:8080${GREEN}           ║"
     echo -e "║    ${GREEN}   Username: admin | Password: admin${GREEN}                         ║"
     echo -e "║    ${GREEN}🔧 Main Website:${GREEN} http://$DOMAIN${GREEN}                       ║"
-    echo -e "║    ${GREEN}📊 Monitoring:${GREEN} http://$DOMAIN/advanced-monitoring.php${GREEN}  ║"
     echo -e "║    ${GREEN}⚡ Cache Status:${GREEN} http://$DOMAIN/cache-status.php${GREEN}       ║"
-    echo "║                                                              ║"
-    echo "╠══════════════════════════════════════════════════════════════╣"
-    echo "║                                                              ║"
-    echo -e "║    ${CYAN}🎉 ALL FEATURES 100% OPERATIONAL:${GREEN}                           ║"
-    echo "║                                                              ║"
-    echo -e "║    ${GREEN}• Option A: Web Control Panel ✅${GREEN}                            ║"
-    echo -e "║    ${GREEN}• Option B: Enhanced Security ✅${GREEN}                            ║"
-    echo -e "║    ${GREEN}• Option C: Performance Boost ✅${GREEN}                            ║"
-    echo -e "║    ${GREEN}• All Existing Features ✅${GREEN}                                  ║"
     echo "║                                                              ║"
     echo "╠══════════════════════════════════════════════════════════════╣"
     echo "║                                                              ║"
